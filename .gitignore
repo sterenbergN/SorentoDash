@@ -1,0 +1,14 @@
+# Simulator toolchain (auto-downloaded by sim/build.ps1)
+sim/.tools/
+
+# Simulator build outputs & runtime state
+sim/build/
+sim/state/
+
+# Arduino intermediate compile artifacts & cache
+build/esp32.esp32.esp32s3/
+build/*.elf
+build/*.map
+
+# Local test / output logs
+hs_out.txt

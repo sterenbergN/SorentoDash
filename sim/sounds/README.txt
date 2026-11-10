@@ -1,0 +1,3 @@
+Put .wav files here to hear your own horns in the simulator.
+Names are shortened to 8.3 like on the Audio FX board (e.g. TACOTRUCK.wav -> TACOTRUC.WAV).
+Add a number prefix to control the order: 01_TRAIN.wav, 02_DIXIE.wav ...
