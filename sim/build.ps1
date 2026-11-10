@@ -10,7 +10,19 @@ $proj = Split-Path $sim
 $tools = "$sim\.tools"
 $out = "$sim\build"
 $libs = "$env:USERPROFILE\OneDrive\Documents\Arduino\libraries"
-if (-not (Test-Path $libs)) { $libs = "$env:USERPROFILE\Documents\Arduino\libraries" }
+if (-not (Test-Path "$libs\LovyanGFX\src")) { $libs = "$env:USERPROFILE\Documents\Arduino\libraries" }
+if (-not (Test-Path "$libs\LovyanGFX\src")) {
+  $toolsLibs = "$tools\libraries"
+  if (Test-Path "$toolsLibs\LovyanGFX\src") {
+    $libs = $toolsLibs
+  } else {
+    Write-Host "Arduino libraries not found in Documents\Arduino\libraries. Invoking setup.ps1 -SimOnly..."
+    & "$proj\setup.ps1" -SimOnly
+    if (Test-Path "$toolsLibs\LovyanGFX\src") {
+      $libs = $toolsLibs
+    }
+  }
+}
 
 # ---- toolchain
 $zig = Get-ChildItem "$tools\zig-*\zig.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
