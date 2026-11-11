@@ -49,6 +49,6 @@ Not simulated: firmware updates over Wi-Fi, a real OBD adapter, OGG playback.
 `build.ps1` compiles `SorentoDash.ino` directly as C++ with `-DSORENTO_SIM`
 (no Arduino tools needed: the sketch defines every function before using it,
 so keep it that way) against the stand-ins in `sim\shim` (Arduino core,
-FreeRTOS, Preferences, FFat, WebServer, Wire, NeoPixel, NimBLE), and links it
+FreeRTOS, Preferences, LittleFS, WebServer, Wire, NeoPixel, NimBLE), and links it
 with `SimHardware.cpp` and `main.cpp`. The only firmware change for this is the
 `SORENTO_SIM` screen in `Board.h`.

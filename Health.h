@@ -15,7 +15,7 @@
 // These point at likely suspects - they are not a diagnosis.
 #pragma once
 #include <Arduino.h>
-#include <FFat.h>
+#include "Storage.h"
 #include <vector>
 #include "EventLog.h"
 
@@ -66,6 +66,20 @@ public:
     mtx = xSemaphoreCreateMutex();
     lock();
     load();
+    // In the car the power goes with the key, so a drive is almost never seen
+    // to end. Its running totals were saved every minute: count it now.
+    std::vector<uint8_t> raw = Storage::readFile(DRIVE_PATH);
+    DriveSummary s;
+    if (raw.size() == sizeof(s)) {
+      memcpy((void *)&s, raw.data(), sizeof(s));
+      if (s.magic == SUMMARY_MAGIC && s.version == 1 && s.seq == (uint8_t)(st.seq + 1) && s.nRatios <= MAX_RATIOS) {
+        uint16_t before = st.drives;
+        foldLocked(s);
+        unsaved = true;  // written by poll() once the power has settled
+        events.add("Health: last drive %s (%d min of engine data)", st.drives > before ? "counted" : "too short to count",
+                   (int)(s.sec / 60));
+      }
+    }
     evaluateLocked();
     unlock();
   }
@@ -87,7 +101,9 @@ public:
   // Forget what's normal (after a repair) and start learning again.
   void relearn() {
     lock();
+    uint8_t seq = st.seq;  // the drive in progress still belongs to the next number
     st = State();
+    st.seq = seq;
     saveLocked();
     evaluateLocked();
     unlock();
@@ -103,6 +119,8 @@ public:
     d.hasMaf = hasMaf;
     // Battery before the engine started, if read in the last minute.
     if (!isnan(restVolts) && millis() - restVoltsAt < 60000) d.restV = restVolts;
+    checkpointSec = 0;
+    if (unsaved) persistLocked();  // the previous drive's result, before this one's checkpoints replace it
     unlock();
   }
 
@@ -172,7 +190,18 @@ public:
       d.hotSec = 0;
     }
     if (d.coldStart && !d.warmed && d.movingSec > 20 * 60) noteEvent(E_NO_WARM, "Engine not warm after 20 min of driving");
+
+    // Checkpoint the drive so far (see begin). Written outside the lock so the
+    // screens never wait on the flash.
+    bool due = d.sec - checkpointSec >= CHECKPOINT_SEC;
+    DriveSummary snap;
+    if (due) {
+      checkpointSec = d.sec;
+      if (unsaved) persistLocked();
+      snap = summarizeLocked();
+    }
     unlock();
+    if (due) Storage::writeFile(DRIVE_PATH, &snap, sizeof(snap));
   }
 
   // Every few seconds: temperatures, load and voltage (NAN = not read this time).
@@ -237,34 +266,25 @@ public:
     d.active = false;
     flushIdle();
     flushRatio();
-    bool counts = d.sec > 120;  // a few seconds of engine running teaches nothing
-    if (counts) {
-      static const uint8_t MIN_N[M_COUNT] = {2, 2, 2, 2, 1, 1, 20, 1, 20, 2, 3, 1, 1, 1, 1, 1, 5};
-      for (int i = 0; i < M_COUNT; i++) {
-        if (i == M_CRUISE_RATIO || i == M_RATIO_JITTER || i == M_HWY_MPG || i == M_REST_V) continue;
-        if (d.a[i].n >= MIN_N[i]) addMetric(i, d.a[i].sum / d.a[i].n);
-      }
-      // The car's top gear: the lowest RPM-per-mph windows of the drive.
-      if (!d.ratios.empty()) {
-        float lo = 1e9;
-        for (auto &w : d.ratios) lo = min(lo, w.mean);
-        float sum = 0, jit = 0;
-        int n = 0;
-        for (auto &w : d.ratios)
-          if (w.mean <= lo * 1.04f) sum += w.mean, jit += w.jitter, n++;
-        if (n >= 2) {
-          addMetric(M_CRUISE_RATIO, sum / n);
-          addMetric(M_RATIO_JITTER, jit / n);
-        }
-      }
-      if (d.hwyMiles >= 3 && d.hwyGal > 0.02f) addMetric(M_HWY_MPG, d.hwyMiles / d.hwyGal);
-      if (!isnan(d.restV)) addMetric(M_REST_V, d.restV);
-      st.drives++;
-      if (d.hasMaf) st.hasMaf = 1;
-    }
-    // One-off events fade over clean drives.
-    for (int e = 0; e < E_COUNT; e++) st.score[e] = st.score[e] * (counts ? 0.8f : 1.0f) + min<int>(d.events[e], 2);
-    evaluateLocked(true);
+    foldLocked(summarizeLocked());
+    saveLocked();
+    unsaved = false;
+    unlock();
+    Storage::remove(DRIVE_PATH);
+  }
+
+  // Call regularly (main loop). A drive finished at start-up (see begin) is
+  // written to flash here, once the power has been steady for a few seconds.
+  void poll() {
+    if (!unsaved || millis() < EventLog::HOLD_MS) return;
+    lock();
+    persistLocked();
+    unlock();
+  }
+
+  // Write the learned state again (after the file store was reformatted).
+  void resave() {
+    lock();
     saveLocked();
     unlock();
   }
@@ -320,15 +340,22 @@ private:
     HealthMetric m[M_COUNT];
     float score[E_COUNT] = {};
     uint8_t status[C_COUNT] = {};  // last reported, to log changes
-    uint8_t hasMaf = 0, pad[2] = {};
+    uint8_t hasMaf = 0;
+    uint8_t seq = 0;  // number of the last drive folded in (so a checkpoint is never counted twice)
+    uint8_t pad = 0;
   };
 
 public:
   static constexpr size_t STATE_SIZE = sizeof(State);  // the saved file (and its backup)
+  // The drive in progress, checkpointed while driving.
+  static constexpr const char *DRIVE_PATH = "/health_drive.bin";
+  static constexpr float CHECKPOINT_SEC = 60;
 
 private:
   static constexpr uint32_t MAGIC = 0x48454C54;  // "HELT"
+  static constexpr uint32_t SUMMARY_MAGIC = 0x48445256;  // "HDRV"
   static constexpr const char *PATH = "/health.bin";
+  static constexpr int MAX_RATIOS = 40;
 
   struct Acc {
     double sum = 0;
@@ -357,10 +384,25 @@ private:
     float restV = NAN;
     uint8_t events[E_COUNT] = {};
   };
+  // What a drive adds up to: the part of DriveAcc that is folded into the
+  // learned state when it ends. This is what the checkpoint file holds.
+  struct DriveSummary {
+    uint32_t magic = SUMMARY_MAGIC;
+    uint16_t version = 1;
+    uint8_t seq = 0, hasMaf = 0;
+    float sec = 0, hwyMiles = 0, hwyGal = 0, restV = NAN;
+    double sum[M_COUNT] = {};
+    uint32_t n[M_COUNT] = {};
+    uint8_t events[E_COUNT] = {};
+    uint16_t nRatios = 0, pad = 0;
+    RatioWin ratios[MAX_RATIOS] = {};
+  };
 
   SemaphoreHandle_t mtx = nullptr;
   State st;
   DriveAcc d;
+  float checkpointSec = 0;
+  bool unsaved = false;  // a drive was folded in at start-up and isn't on flash yet
   Result res[C_COUNT];
   volatile bool demo = false;
   float displacement = 3.5f;
@@ -371,17 +413,67 @@ private:
   void unlock() { if (mtx) xSemaphoreGive(mtx); }
 
   void load() {
-    File f = FFat.open(PATH, FILE_READ);
+    std::vector<uint8_t> raw = Storage::readFile(PATH);
     State s;
-    if (f && f.size() == sizeof(State) && f.read((uint8_t *)&s, sizeof(s)) == sizeof(s) && s.magic == MAGIC && s.version == 1)
-      st = s;
-    if (f) f.close();
+    if (raw.size() != sizeof(State)) return;
+    memcpy((void *)&s, raw.data(), sizeof(s));
+    if (s.magic == MAGIC && s.version == 1) st = s;
   }
-  void saveLocked() {
-    File f = FFat.open(PATH, FILE_WRITE);
-    if (!f) return;
-    f.write((const uint8_t *)&st, sizeof(st));
-    f.close();
+  void saveLocked() { Storage::writeFile(PATH, &st, sizeof(st)); }
+  // State first, then the checkpoint it came from: if the power goes in
+  // between, the leftover checkpoint's number no longer matches and it's ignored.
+  void persistLocked() {
+    saveLocked();
+    Storage::remove(DRIVE_PATH);
+    unsaved = false;
+  }
+
+  DriveSummary summarizeLocked() const {
+    DriveSummary s;
+    s.seq = st.seq + 1;
+    s.hasMaf = d.hasMaf;
+    s.sec = d.sec;
+    s.hwyMiles = d.hwyMiles;
+    s.hwyGal = d.hwyGal;
+    s.restV = d.restV;
+    for (int i = 0; i < M_COUNT; i++) s.sum[i] = d.a[i].sum, s.n[i] = d.a[i].n;
+    memcpy(s.events, d.events, sizeof(s.events));
+    s.nRatios = min<int>(d.ratios.size(), MAX_RATIOS);
+    for (int i = 0; i < s.nRatios; i++) s.ratios[i] = d.ratios[i];
+    return s;
+  }
+
+  // Fold a finished drive's averages into the learned state and update the checks.
+  void foldLocked(const DriveSummary &s) {
+    bool counts = s.sec > 120;  // a few seconds of engine running teaches nothing
+    if (counts) {
+      static const uint8_t MIN_N[M_COUNT] = {2, 2, 2, 2, 1, 1, 20, 1, 20, 2, 3, 1, 1, 1, 1, 1, 5};
+      for (int i = 0; i < M_COUNT; i++) {
+        if (i == M_CRUISE_RATIO || i == M_RATIO_JITTER || i == M_HWY_MPG || i == M_REST_V) continue;
+        if (s.n[i] >= MIN_N[i]) addMetric(i, s.sum[i] / s.n[i]);
+      }
+      // The car's top gear: the lowest RPM-per-mph windows of the drive.
+      if (s.nRatios) {
+        float lo = 1e9;
+        for (int i = 0; i < s.nRatios; i++) lo = min(lo, s.ratios[i].mean);
+        float sum = 0, jit = 0;
+        int n = 0;
+        for (int i = 0; i < s.nRatios; i++)
+          if (s.ratios[i].mean <= lo * 1.04f) sum += s.ratios[i].mean, jit += s.ratios[i].jitter, n++;
+        if (n >= 2) {
+          addMetric(M_CRUISE_RATIO, sum / n);
+          addMetric(M_RATIO_JITTER, jit / n);
+        }
+      }
+      if (s.hwyMiles >= 3 && s.hwyGal > 0.02f) addMetric(M_HWY_MPG, s.hwyMiles / s.hwyGal);
+      if (!isnan(s.restV)) addMetric(M_REST_V, s.restV);
+      st.drives++;
+      if (s.hasMaf) st.hasMaf = 1;
+    }
+    // One-off events fade over clean drives.
+    for (int e = 0; e < E_COUNT; e++) st.score[e] = st.score[e] * (counts ? 0.8f : 1.0f) + min<int>(s.events[e], 2);
+    st.seq = s.seq;
+    evaluateLocked(true);
   }
 
   void addMetric(int i, float v) {

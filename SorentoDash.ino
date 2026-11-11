@@ -43,7 +43,7 @@ RfCapture rf;
 History hist;
 Health health;
 
-#define FW_VERSION "1.18"
+#define FW_VERSION "1.19"
 
 // ---------------------------------------------------------------- tuning
 constexpr uint32_t LONG_PRESS_MS = 600;
@@ -677,6 +677,18 @@ String webBackupJson() {
 
 // Check and keep an uploaded backup; it's applied after the restart that follows.
 String webRestore(const String &body) { return Backup::stage(body); }
+
+// Erase the file store and write back what's in memory (drive history, engine
+// health). The event log starts again. Refused while the demo car is on, when
+// the real history isn't in memory.
+static bool repairStorage() {
+  if (hist.demoOn()) return false;
+  if (!Storage::reformat()) return false;
+  bool ok = hist.resave();
+  health.resave();
+  events.add("Storage repaired: %d drives written back", (int)hist.driveCount());
+  return ok;
+}
 
 String webLogText() {
   return "Sorento Dash " FW_VERSION ", restart #" + String(events.bootNumber()) + ", up " + String(millis() / 60000) +
@@ -1913,6 +1925,13 @@ static std::vector<MenuItem> rootMenu() {
     return std::vector<MenuItem>{
         MenuItem::info("Firmware", [] { return String(FW_VERSION); }),
         MenuItem::info("Drive history", [] { return String(String(hist.driveCount()) + " drives recorded"); }),
+        MenuItem::info("Storage", [] { return Storage::summary(); },
+                       [] {
+                         return String("Drive history, engine health and the event log are kept in the display's "
+                                       "flash memory, and every save is read back to check it.\n\nIf this says "
+                                       "PROBLEM, saves are failing: download a backup from the phone page, then use "
+                                       "Repair storage below.");
+                       }),
         MenuItem::info("Event log", [] { return String("on the phone page"); },
                        [] {
                          return String("Restarts, adapter connections, drives, fill-ups, warnings and setting changes are "
@@ -1927,6 +1946,8 @@ static std::vector<MenuItem> rootMenu() {
                        }),
         MenuItem::act("Clear drive history", [] { hist.clear(); showToast("History cleared"); }, nullptr,
                       "Delete drive history?"),
+        MenuItem::act("Repair storage", [] { showToast(repairStorage() ? "Storage repaired" : "Repair failed"); }, nullptr,
+                      "Erase and rebuild storage?"),
         MenuItem::act("Restart", [] { ESP.restart(); }, nullptr, "Restart the display?"),
     };
   }, [] { return String(String("version ") + FW_VERSION); }));
@@ -2123,13 +2144,15 @@ static void handleInput(int32_t det, Press btn, uint32_t now) {
 //   cw [n] / ccw [n]  turn the knob           press / long   push the knob
 //   swipe l|r  touch swipe                    obdsim 0|1  demo car on/off
 //   shot    dump the frame buffer (RGB565)   log 0|1  Audio FX link logging
-//   status  connection summary
+//   status  connection summary               files   what's in the flash file store
+//   events  the event log                    hist    drive history (JSON)
+//   fsput <path> <offset> <hex> / fsrm <path>   write / delete a file      restart
 #ifdef SORENTO_SIM
 // Simulator testing for the health checks: feed them synthetic 15-minute
 // drives (city with a cold start, idle, highway, a hard acceleration, idle).
 // The first LEARN_DRIVES are normal; after that the named fault is added.
-//   healthtest ok|leak|maf|fuel|rich|bank|idle|stall|thermo|hot|knock|trans|mpg|battery|tps|sensor [drives]
-static void healthTest(const String &kind, int drives) {
+//   healthtest ok|leak|maf|fuel|rich|bank|idle|stall|thermo|hot|knock|trans|mpg|battery|tps|sensor [drives] [cut]   (cut: the last drive loses power instead of ending)
+static void healthTest(const String &kind, int drives, bool cut = false) {
   health.setDemo(false);
   for (int n = 0; n < drives; n++) {
     bool fault = n >= Health::LEARN_DRIVES;
@@ -2174,11 +2197,41 @@ static void healthTest(const String &kind, int drives) {
         health.details(st, lt, timing, throttle, mph, rpm);
       }
     }
-    health.endDrive();
+    if (!(cut && n == drives - 1)) health.endDrive();  // "cut": the last drive loses power instead of ending
   }
   Serial.printf("healthtest %s: %d drives\n", kind.c_str(), drives);
 }
 #endif
+
+// Known files in the store, with sizes (console "files").
+static void printFiles() {
+  Serial.printf("storage %s: mounted=%d formatted=%d writes=%lu failures=%lu used=%u of %u bytes\n",
+                Storage::summary().c_str(), Storage::mounted, Storage::formatted, (unsigned long)Storage::writes,
+                (unsigned long)Storage::failures, (unsigned)LittleFS.usedBytes(), (unsigned)LittleFS.totalBytes());
+  for (const char *n : {"/events.log", "/events.old", "/drives.bin", "/fills.bin", "/speed.bin", "/health.bin", "/health_drive.bin",
+                        "/demo_drives.bin", "/demo_fills.bin", "/demo_speed.bin", "/restore.json"})
+    if (LittleFS.exists(n)) Serial.printf("  %-18s %u\n", n, (unsigned)Storage::size(n));
+}
+
+// "fsput <path> <offset> <hex>": write bytes into a file (offset 0 starts it
+// again). For putting recovered history back over USB.
+static void consolePut(const String &args) {
+  int a = args.indexOf(' '), b = args.indexOf(' ', a + 1);
+  if (a < 1 || b < 0) { Serial.println("ERR usage: fsput <path> <offset> <hex>"); return; }
+  String path = args.substring(0, a), hex = args.substring(b + 1);
+  size_t offset = args.substring(a + 1, b).toInt();
+  std::vector<uint8_t> bytes;
+  auto nib = [](char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; };
+  for (unsigned int i = 0; i + 1 < hex.length(); i += 2) {
+    int hi = nib(hex[i]), lo = nib(hex[i + 1]);
+    if (hi < 0 || lo < 0) { Serial.println("ERR bad hex"); return; }
+    bytes.push_back(hi << 4 | lo);
+  }
+  bool ok;
+  if (offset == 0) ok = Storage::writeFile(path, bytes.data(), bytes.size());
+  else ok = Storage::size(path) == offset && Storage::appendFile(path, bytes.data(), bytes.size());
+  Serial.printf("%s %s %u\n", ok ? "OK" : "ERR", path.c_str(), (unsigned)Storage::size(path));
+}
 
 static bool handleConsole(int32_t &det, Press &btn, int &swipe) {
   if (!Serial.available()) return false;
@@ -2200,15 +2253,21 @@ static bool handleConsole(int32_t &det, Press &btn, int &swipe) {
   else if (s == "tripclear") { obd.resetTrip(); obd.filledUp(0.01f); }  // zero trip + tank
   else if (s == "shot") return true;
   else if (s == "ver") Serial.println(FW_VERSION " " __DATE__ " " __TIME__);
-  else if (s == "events") Serial.print(webLogText());
-  else if (s == "health") Serial.println(webHealthJson());
+  else if (s == "events" || s == "health") {
+    Serial.setTxTimeoutMs(1000);  // long replies: wait for the PC instead of dropping the rest
+    Serial.println(s == "events" ? webLogText() : webHealthJson());
+    Serial.setTxTimeoutMs(0);
+  }
 #ifdef SORENTO_SIM
   else if (s == "healthreset") health.relearn();
   else if (s.startsWith("addmiles ")) obd.addTestMiles(s.substring(9).toFloat());
   else if (s.startsWith("healthtest ")) {
     String a = s.substring(11);
     int sp2 = a.indexOf(' ');
-    healthTest(sp2 > 0 ? a.substring(0, sp2) : a, sp2 > 0 ? a.substring(sp2 + 1).toInt() : 12);
+    bool cut = a.endsWith(" cut");
+    if (cut) a = a.substring(0, a.length() - 4);
+    sp2 = a.indexOf(' ');
+    healthTest(sp2 > 0 ? a.substring(0, sp2) : a, sp2 > 0 ? a.substring(sp2 + 1).toInt() : 12, cut);
   }
 #endif
   else if (s.startsWith("maint ")) webMaint(s.substring(6));  // same JSON as the phone page
@@ -2218,6 +2277,10 @@ static bool handleConsole(int32_t &det, Press &btn, int &swipe) {
   else if (s == "tankfull") obd.markTankFull();
   else if (s == "gapclear") obd.markTankComplete();
   else if (s == "histreload") hist.reload();
+  else if (s == "files") printFiles();
+  else if (s.startsWith("fsput ")) consolePut(s.substring(6));
+  else if (s.startsWith("fsrm ")) Serial.println(Storage::remove(s.substring(5)) ? "OK" : "ERR");
+  else if (s == "restart") ESP.restart();
   else if (s == "home") enterMode(MODE_CAR);
   else if (s.startsWith("page ")) { carPage = constrain((int)s.substring(5).toInt(), 0, CP_COUNT - 1); enterMode(MODE_CAR); }
   else if (s == "histdemo") Serial.println(hist.fillDemo() ? "demo history filled" : "demo car is off - refused");
@@ -2265,11 +2328,13 @@ void setup() {
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);  // never stall the UI when no PC is reading the console
 
-  // Flash file system first: the event log, and a backup waiting to be restored
+  // Flash file store first: the event log, and a backup waiting to be restored
   // before any settings are read.
-  FFat.begin(true);
+  Storage::begin();
   events.begin();
   events.add("Started v" FW_VERSION ": %s", EventLog::resetReason());
+  if (Storage::formatted) events.add("Storage was blank or unreadable: started a new one");
+  if (!Storage::mounted) events.add("Storage unavailable: nothing will be saved");
   Backup::applyStaged();
 
   pinMode(PIN_POWER_LED, OUTPUT);
@@ -2326,6 +2391,15 @@ void loop() {
 
   fx.poll();
   web.loop();
+  events.poll();
+  health.poll();
+  // Saves that fail are said out loud, once (and logged, if the log still works).
+  static bool storageWarned = false;
+  if (!storageWarned && now > 10000 && !Storage::healthy()) {
+    storageWarned = true;
+    showToast("Storage problem");
+    events.add("Storage problem: saves are failing (%lu so far)", (unsigned long)Storage::failures);
+  }
   rf.poll(Serial);
   obd.setOnComputer(Serial.isPlugged());
 

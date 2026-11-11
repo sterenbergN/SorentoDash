@@ -8,13 +8,13 @@
 #pragma once
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include <FFat.h>
 #include <Preferences.h>
 #include <functional>
 #include <vector>
 #include "EventLog.h"
 #include "Health.h"
 #include "History.h"
+#include "Storage.h"
 
 namespace Backup {
 
@@ -85,16 +85,6 @@ inline bool decode64(const char *in, std::vector<uint8_t> &out) {
   return true;
 }
 
-inline std::vector<uint8_t> readFile(const String &path) {
-  std::vector<uint8_t> out;
-  File f = FFat.open(path, FILE_READ);
-  if (!f) return out;
-  out.resize(f.size());
-  out.resize(f.read(out.data(), out.size()));
-  f.close();
-  return out;
-}
-
 // ---- backup
 // `files(name)` returns a history file's bytes (History reads it under its lock).
 inline String make(const char *fw, std::function<std::vector<uint8_t>(const char *)> files) {
@@ -139,22 +129,15 @@ inline String stage(const String &body) {
     const char *b64 = doc["files"][h.name] | "";
     if (!decode64(b64, bytes) || bytes.size() % h.record) return "The backup's drive history is damaged.";
   }
-  File f = FFat.open(STAGED, FILE_WRITE);
-  if (!f) return "Couldn't save the backup on the display.";
-  bool ok = f.write((const uint8_t *)body.c_str(), body.length()) == body.length();
-  f.close();
-  if (!ok) {
-    FFat.remove(STAGED);
-    return "Couldn't save the backup on the display.";
-  }
+  if (!Storage::writeFile(STAGED, body.c_str(), body.length())) return "Couldn't save the backup on the display.";
   return "";
 }
 
 // At start, before settings are read: apply a staged backup, if any.
 inline void applyStaged() {
-  if (!FFat.exists(STAGED)) return;
-  std::vector<uint8_t> raw = readFile(STAGED);
-  FFat.remove(STAGED);  // whatever happens, only try once
+  std::vector<uint8_t> raw = Storage::readFile(STAGED);
+  if (raw.empty()) return;
+  Storage::remove(STAGED);  // whatever happens, only try once
   JsonDocument doc;
   if (deserializeJson(doc, (const char *)raw.data(), raw.size()) || doc["format"] != FORMAT) {
     events.add("Restore failed: backup unreadable");
@@ -186,14 +169,12 @@ inline void applyStaged() {
   int drives = 0;
   for (const HistFile &h : FILES) {
     String path = String("/") + h.name + ".bin";
-    FFat.remove(path);
+    Storage::remove(path);
     if (!decode64(doc["files"][h.name] | "", bytes) || bytes.empty()) continue;
-    File f = FFat.open(path, FILE_WRITE);
-    if (!f) continue;
-    f.write(bytes.data(), bytes.size());
-    f.close();
+    if (!Storage::writeFile(path, bytes.data(), bytes.size())) continue;
     if (!strcmp(h.name, "drives")) drives = bytes.size() / h.record;
   }
+  Storage::remove(Health::DRIVE_PATH);  // a half-recorded drive belongs to the old health state
   events.add("Restored a backup from v%s (%d drives)", (const char *)(doc["fw"] | "?"), drives);
 }
 

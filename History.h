@@ -1,15 +1,21 @@
 // Driving history for the phone page's charts: one record per drive, one per
 // fill-up, and lifetime efficiency by speed band. Stored as small binary files
-// on the flash's FAT partition (plenty of room: ~10 MB).
+// in the flash file store (Storage.h; plenty of room: ~10 MB).
 //
 // Fed from the OBD task (tick/beginDrive/endDrive/addFill), read by the web
 // server (json). A mutex keeps the two apart. The display has no clock, so
 // drives are identified by number and odometer rather than date.
+//
+// Power can vanish at any moment (it goes with the ignition), so the drive in
+// progress is saved every few seconds, every save is read back, and a file is
+// never thrown away because memory and flash disagree: whichever side knows
+// more drives wins (see saveDrive).
 #pragma once
 #include <Arduino.h>
-#include <FFat.h>
+#include <cmath>
 #include <vector>
 #include "EventLog.h"
+#include "Storage.h"
 
 struct DriveRec {
   uint32_t epoch;  // reserved (no clock; always 0)
@@ -35,11 +41,14 @@ public:
   static constexpr int BANDS = 8;
   static constexpr uint8_t BAND_MIN[BANDS] = {1, 15, 25, 35, 45, 55, 65, 75};
 
+  // How often the drive in progress is written (ms). The end of a drive is
+  // never seen - the power just goes - so this is how much of it can be lost.
+  static constexpr uint32_t SAVE_EVERY_MS = 15000;
+
+  // Call after Storage::begin().
   void begin() {
     mtx = xSemaphoreCreateMutex();
-    // Formats the partition on first use (takes a few seconds, once).
-    ok = FFat.begin(true);
-    if (ok) load();
+    load();
   }
 
   // Demo car: use separate scratch files (wiped each time demo starts) so demo
@@ -48,10 +57,8 @@ public:
     lock();
     demo = on;
     clearRam();
-    if (ok) {
-      if (on) removeFiles();
-      else loadLocked();
-    }
+    if (on) removeFiles();
+    else loadLocked();
     unlock();
   }
 
@@ -107,7 +114,7 @@ public:
       drives.push_back(cur);
       curIndex = drives.size() - 1;
       saveDrive();
-    } else if (curIndex >= 0 && millis() - lastSave > 30000) {
+    } else if (curIndex >= 0 && millis() - lastSave > SAVE_EVERY_MS) {
       saveDrive();  // power can vanish with the ignition: keep it fresh
     }
     bool bandsDue = millis() - lastBandSave > 60000;
@@ -119,20 +126,17 @@ public:
     lock();
     FillRec f{now(), odo, pumped, estimated, tankMiles, (uint8_t)valid, {0, 0, 0}};
     fills.push_back(f);
-    if (ok) append(path("fills"), &f, sizeof(f));
+    // Normally just added to the end; if the file isn't what memory says, write it whole.
+    String p = path("fills");
+    if (Storage::size(p) != (fills.size() - 1) * sizeof(FillRec) || !Storage::appendFile(p, &f, sizeof(f)))
+      Storage::writeFile(p, fills.data(), fills.size() * sizeof(FillRec));
     unlock();
   }
 
   // Raw copy of a real (not demo) history file, for backups.
   std::vector<uint8_t> rawFile(const char *name) {
-    std::vector<uint8_t> out;
     lock();
-    File f = FFat.open(String("/") + name + ".bin", FILE_READ);
-    if (f) {
-      out.resize(f.size());
-      out.resize(f.read(out.data(), out.size()));
-      f.close();
-    }
+    std::vector<uint8_t> out = Storage::readFile(String("/") + name + ".bin");
     unlock();
     return out;
   }
@@ -140,17 +144,32 @@ public:
   void clear() {
     lock();
     clearRam();
-    if (ok) removeFiles();
+    removeFiles();
     unlock();
     events.add("Drive history cleared");
   }
+
+  // Write everything held in memory back to the files (after the store was
+  // reformatted). Not while the demo car is on: the real history isn't in memory then.
+  bool resave() {
+    lock();
+    bool done = !demo;
+    if (done) {
+      done = Storage::writeFile(path("drives"), drives.data(), drives.size() * sizeof(DriveRec));
+      done = Storage::writeFile(path("fills"), fills.data(), fills.size() * sizeof(FillRec)) && done;
+    }
+    unlock();
+    if (done) saveBands();
+    return done;
+  }
+  bool demoOn() const { return demo; }
 
   // Compact JSON for the charts: arrays of numbers, newest last.
   String json(size_t maxDrives = 400) {
     lock();
     String o;
     o.reserve(8192 + drives.size() * 48);
-    o += "{\"now\":" + String(now()) + ",\"storage\":" + String(ok ? "true" : "false") + ",\"drives\":[";
+    o += "{\"now\":" + String(now()) + ",\"storage\":" + String(Storage::healthy() ? "true" : "false") + ",\"drives\":[";
     size_t start = drives.size() > maxDrives ? drives.size() - maxDrives : 0;
     for (size_t i = start; i < drives.size(); i++) {
       const DriveRec &d = drives[i];
@@ -183,17 +202,13 @@ public:
   void saveBands() {
     lock();
     lastBandSave = millis();
-    if (ok) {
-      File f = FFat.open(path("speed"), FILE_WRITE);
-      if (f) {
-        f.write((uint8_t *)bandMiles, sizeof(bandMiles));
-        f.write((uint8_t *)bandGal, sizeof(bandGal));
-        f.write((uint8_t *)bandSec, sizeof(bandSec));
-        f.write((uint8_t *)&idleSec, sizeof(idleSec));
-        f.write((uint8_t *)&idleGal, sizeof(idleGal));
-        f.close();
-      }
-    }
+    BandFile b;
+    memcpy(b.miles, bandMiles, sizeof(bandMiles));
+    memcpy(b.gallons, bandGal, sizeof(bandGal));
+    memcpy(b.seconds, bandSec, sizeof(bandSec));
+    b.idleSec = idleSec;
+    b.idleGal = idleGal;
+    Storage::writeFile(path("speed"), &b, sizeof(b));
     unlock();
   }
 
@@ -262,7 +277,7 @@ public:
   void reload() {
     lock();
     clearRam();
-    if (ok) loadLocked();
+    loadLocked();
     unlock();
   }
 
@@ -275,7 +290,7 @@ public:
 
 private:
   SemaphoreHandle_t mtx = nullptr;
-  bool ok = false, demo = false, driving = false;
+  bool demo = false, driving = false;
   std::vector<DriveRec> drives;
   std::vector<FillRec> fills;
   DriveRec cur{};
@@ -289,8 +304,25 @@ private:
 
   String path(const char *name) const { return String(demo ? "/demo_" : "/") + name + ".bin"; }
 
+  // The speed-band file: exactly the layout the old firmware wrote field by field.
+  struct BandFile {
+    float miles[BANDS], gallons[BANDS], seconds[BANDS];
+    float idleSec, idleGal;
+  };
+
   void removeFiles() {
-    for (const char *n : {"drives", "fills", "speed"}) FFat.remove(path(n));
+    for (const char *n : {"drives", "fills", "speed"}) Storage::remove(path(n));
+  }
+
+  // A record that can't be real (flash damage, a half-written file) is left out.
+  static bool sane(const DriveRec &d) {
+    return std::isfinite(d.startOdo) && std::isfinite(d.miles) && std::isfinite(d.gallons) && std::isfinite(d.idleGallons) &&
+           d.startOdo >= 0 && d.startOdo < 2e6f && d.miles >= 0 && d.miles < 5000 && d.gallons >= 0 && d.gallons < 500 &&
+           d.seconds < 30UL * 86400 && d.idleGallons >= 0;
+  }
+  static bool sane(const FillRec &f) {
+    return std::isfinite(f.odo) && std::isfinite(f.pumped) && std::isfinite(f.estimated) && std::isfinite(f.tankMiles) && f.odo >= 0 &&
+           f.odo < 2e6f && f.pumped > 0 && f.pumped < 200 && f.estimated >= 0 && f.estimated < 500 && f.tankMiles >= 0;
   }
 
   void clearRam() {
@@ -313,55 +345,72 @@ private:
   void loadLocked() {
     readAll(path("drives"), drives);
     readAll(path("fills"), fills);
-    File f = FFat.open(path("speed"), FILE_READ);
-    if (f && f.size() == sizeof(bandMiles) * 3 + sizeof(float) * 2) {
-      f.read((uint8_t *)bandMiles, sizeof(bandMiles));
-      f.read((uint8_t *)bandGal, sizeof(bandGal));
-      f.read((uint8_t *)bandSec, sizeof(bandSec));
-      f.read((uint8_t *)&idleSec, sizeof(idleSec));
-      f.read((uint8_t *)&idleGal, sizeof(idleGal));
+    std::vector<uint8_t> raw = Storage::readFile(path("speed"));
+    BandFile b;
+    if (raw.size() == sizeof(b)) {
+      memcpy(&b, raw.data(), sizeof(b));
+      bool good = std::isfinite(b.idleSec) && std::isfinite(b.idleGal);
+      for (int i = 0; i < BANDS; i++) good = good && std::isfinite(b.miles[i]) && std::isfinite(b.gallons[i]) && std::isfinite(b.seconds[i]);
+      if (good) {
+        memcpy(bandMiles, b.miles, sizeof(bandMiles));
+        memcpy(bandGal, b.gallons, sizeof(bandGal));
+        memcpy(bandSec, b.seconds, sizeof(bandSec));
+        idleSec = b.idleSec;
+        idleGal = b.idleGal;
+      }
     }
-    if (f) f.close();
   }
 
+  // Read a file of records. Damaged records (and a half record at the end) are
+  // dropped, and the file is tidied to match so record numbers stay in step.
   template <typename T>
   void readAll(const String &file, std::vector<T> &out) {
     out.clear();
-    File f = FFat.open(file, FILE_READ);
-    if (!f) return;
-    T rec;
-    while (f.read((uint8_t *)&rec, sizeof(T)) == sizeof(T)) out.push_back(rec);
-    f.close();
-  }
-
-  template <typename T>
-  void rewrite(const String &file, const std::vector<T> &v) {
-    if (!ok) return;
-    File f = FFat.open(file, FILE_WRITE);
-    if (!f) return;
-    for (auto &r : v) f.write((const uint8_t *)&r, sizeof(T));
-    f.close();
-  }
-
-  void append(const String &file, const void *rec, size_t n) {
-    File f = FFat.open(file, FILE_APPEND);
-    if (!f) return;
-    f.write((const uint8_t *)rec, n);
-    f.close();
+    std::vector<uint8_t> raw = Storage::readFile(file);
+    size_t n = raw.size() / sizeof(T);
+    out.reserve(n + 8);
+    for (size_t i = 0; i < n; i++) {
+      T rec;
+      memcpy(&rec, raw.data() + i * sizeof(T), sizeof(T));
+      if (sane(rec)) out.push_back(rec);
+    }
+    if (out.size() * sizeof(T) != raw.size()) {
+      if (!demo)
+        events.add("History file %s: %u of %u bytes usable, tidied", file.c_str(), (unsigned)(out.size() * sizeof(T)),
+                   (unsigned)raw.size());
+      Storage::writeFile(file, out.data(), out.size() * sizeof(T));
+    }
   }
 
   // Write the in-progress drive into its slot (it is always the last record).
+  //
+  // The file should hold exactly the drives in memory, with or without the
+  // current one. If it doesn't, nothing is thrown away: a file with MORE drives
+  // than memory (a failed read at start-up) is adopted and this drive added to
+  // it; a shorter or ragged one is replaced whole from memory.
   void saveDrive() {
     lastSave = millis();
     if (curIndex < 0) return;
     drives[curIndex] = cur;
-    if (!ok) return;
-    File f = FFat.open(path("drives"), "r+");
-    if (!f) f = FFat.open(path("drives"), FILE_WRITE);
-    if (!f) return;
-    f.seek(curIndex * sizeof(DriveRec));
-    f.write((const uint8_t *)&drives[curIndex], sizeof(DriveRec));
-    f.close();
+    if (!Storage::mounted) return;
+    String p = path("drives");
+    size_t at = (size_t)curIndex * sizeof(DriveRec), have = Storage::size(p);
+    if (have == at && Storage::appendFile(p, &cur, sizeof(cur))) return;
+    if (have == at + sizeof(DriveRec) && Storage::patchFile(p, at, &cur, sizeof(cur))) return;
+    if (have > at + sizeof(DriveRec)) {
+      std::vector<DriveRec> disk;
+      readAll(p, disk);
+      if (disk.size() > (size_t)curIndex + 1) {
+        if (!demo)
+          events.add("Drive history: found %u saved drives, had %d in memory - kept the saved ones", (unsigned)disk.size(),
+                     curIndex);
+        drives = disk;
+        drives.push_back(cur);
+        curIndex = drives.size() - 1;
+        if (Storage::appendFile(p, &cur, sizeof(cur))) return;
+      }
+    }
+    Storage::writeFile(p, drives.data(), drives.size() * sizeof(DriveRec));
   }
 };
 

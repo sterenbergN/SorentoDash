@@ -7,22 +7,25 @@
 // Safe to call from any task (the OBD task logs too).
 #pragma once
 #include <Arduino.h>
-#include <FFat.h>
 #include <Preferences.h>
 #include <esp_system.h>
 #include <stdarg.h>
+#include "Storage.h"
 
 class EventLog {
 public:
   static constexpr size_t MAX_BYTES = 48 * 1024;  // then the file becomes the "old" half
+  // Nothing is written to flash in the first seconds after power-up: in the car
+  // the power drops again about a second later while the starter cranks. Lines
+  // wait in memory until then, and a start that short isn't counted as a restart.
+  static constexpr uint32_t HOLD_MS = 5000;
 
-  // Call once the FAT partition is mounted.
+  // Call once the file store is mounted.
   void begin() {
     mtx = xSemaphoreCreateMutex();
     Preferences p;
-    p.begin("log", false);
-    boot = p.getUInt("boot", 0) + 1;
-    p.putUInt("boot", boot);
+    p.begin("log", true);
+    boot = p.getUInt("boot", 0) + 1;  // saved at the first flush
     p.end();
     ready = true;
   }
@@ -37,48 +40,61 @@ public:
     va_end(ap);
     uint32_t s = millis() / 1000;
     char line[240];
-    int n = snprintf(line, sizeof(line), "#%lu %lu:%02lu:%02lu  %s\n", (unsigned long)boot, (unsigned long)(s / 3600),
-                     (unsigned long)(s / 60 % 60), (unsigned long)(s % 60), msg);
+    snprintf(line, sizeof(line), "#%lu %lu:%02lu:%02lu  %s\n", (unsigned long)boot, (unsigned long)(s / 3600),
+             (unsigned long)(s / 60 % 60), (unsigned long)(s % 60), msg);
     Serial.print(line);
     if (!ready) return;
     lock();
-    File f = FFat.open(CUR, FILE_APPEND);
-    if (f) {
-      f.write((const uint8_t *)line, min<int>(n, sizeof(line) - 1));
-      size_t size = f.size();
-      f.close();
-      if (size > MAX_BYTES) {  // keep two halves: the previous one and this one
-        FFat.remove(OLD);
-        FFat.rename(CUR, OLD);
+    if (pending.length() < MAX_PENDING) pending += line;
+    unlock();
+    poll();
+  }
+
+  // Write the waiting lines once it's safe to. Call regularly (main loop).
+  void poll() {
+    if (!ready || millis() < HOLD_MS || (retryAt && millis() < retryAt)) return;
+    lock();
+    if (!counted) {
+      Preferences p;
+      p.begin("log", false);
+      p.putUInt("boot", boot);
+      p.end();
+      counted = true;
+    }
+    if (pending.length()) {
+      if (Storage::appendFile(CUR, pending.c_str(), pending.length())) {
+        pending = "";
+        retryAt = 0;
+        if (Storage::size(CUR) > MAX_BYTES) {  // keep two halves: the previous one and this one
+          LittleFS.remove(OLD);
+          LittleFS.rename(CUR, OLD);
+        }
+      } else {
+        retryAt = millis() + 15000;  // the store isn't taking writes: don't hammer it
+        if (!retryAt) retryAt = 1;
       }
     }
     unlock();
   }
 
-  // Whole log, oldest first.
+  // Whole log, oldest first (including lines not yet written to flash).
   String text() {
     String out;
     lock();
     for (const char *path : {OLD, CUR}) {
-      File f = FFat.open(path, FILE_READ);
-      if (!f) continue;
-      size_t n = f.size();
-      String part;
-      part.reserve(n);
-      char buf[512];
-      size_t got;
-      while ((got = f.read((uint8_t *)buf, sizeof(buf))) > 0) part.concat(buf, got);
-      f.close();
-      out += part;
+      std::vector<uint8_t> part = Storage::readFile(path);
+      if (!part.empty()) out.concat((const char *)part.data(), part.size());
     }
+    out += pending;
     unlock();
     return out;
   }
 
   void clear() {
     lock();
-    FFat.remove(OLD);
-    FFat.remove(CUR);
+    Storage::remove(OLD);
+    Storage::remove(CUR);
+    pending = "";
     unlock();
   }
 
@@ -101,9 +117,11 @@ public:
 private:
   static constexpr const char *CUR = "/events.log";
   static constexpr const char *OLD = "/events.old";
+  static constexpr size_t MAX_PENDING = 6000;  // lines kept in memory while the store can't take them
   SemaphoreHandle_t mtx = nullptr;
-  bool ready = false;
-  uint32_t boot = 0;
+  bool ready = false, counted = false;
+  uint32_t boot = 0, retryAt = 0;
+  String pending;
 
   void lock() { if (mtx) xSemaphoreTake(mtx, portMAX_DELAY); }
   void unlock() { if (mtx) xSemaphoreGive(mtx); }

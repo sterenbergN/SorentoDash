@@ -12,3 +12,6 @@ build/*.map
 
 # Local test / output logs
 hs_out.txt
+
+# Flash dumps and recovered data from diagnosing the device (personal driving data)
+build/diag/
