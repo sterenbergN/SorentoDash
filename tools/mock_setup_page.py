@@ -35,7 +35,10 @@ STATE = {"obd": {"state": "Connected", "adapter": "IOS-Vlink", "sim": False, "re
                  "mph": 31, "coolant": 196, "volts": 14.1, "trip": {"mi": 151.1, "gal": 6.96, "sec": 15000, "mpg": 21.7},
                  "tank": {"mi": 22.1, "gal": 1.09, "sec": 2000, "mpg": 20.3}, "range": 406, "disp": 3.5, "tankCap": 21.1,
                  "cal": 1.0, "tankFull": True, "tankIncomplete": False, "calFills": 0, "lastFill": 2, "lastFillEst": 5.9,
-                 "lastFillPumped": 16.2, "mil": False, "codesRead": True, "codes": []},
+                 "lastFillPumped": 16.2, "mil": False, "codesRead": True, "codes": [],
+                 "trans": "2 codes", "transBusy": False, "transCodes": [
+                     {"code": "P0715", "now": True, "text": "Input/turbine speed sensor"},
+                     {"code": "P0741", "now": False, "text": "Lock-up clutch stuck off"}]},
          "connected": True, "volume": 80, "brightness": 90, "leds": True, "tint": 1, "fw": "mock",
          "maint": {"odometer": 181266, "items": [{"name": n, "interval": i, "last": None, "remaining": None} for n, i in
                    [("Oil change", 5000), ("Tire rotation", 7500), ("Engine air filter", 15000), ("Cabin air filter", 15000)]]},

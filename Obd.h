@@ -41,6 +41,26 @@ struct ObdData {
   int nDtcs = 0;
   uint16_t dtcs[8];
 
+  // Transmission computer's own codes, read on request (Obd::readTransmission).
+  enum TransState : uint8_t { TR_NOT_READ, TR_READING, TR_DONE, TR_NO_ANSWER, TR_REFUSED, TR_MOVING, TR_CAR_OFF };
+  TransState trans = TR_NOT_READ;
+  uint8_t transAddr = 0;  // where it answered on the K-line
+  int nTransDtcs = 0;
+  uint16_t transDtcs[8];
+  bool transNow[8];  // fault present right now (otherwise stored from earlier)
+
+  String transText() const {
+    switch (trans) {
+      case TR_READING: return "checking...";
+      case TR_DONE: return nTransDtcs ? String(nTransDtcs) + (nTransDtcs == 1 ? " code" : " codes") : String("no codes");
+      case TR_NO_ANSWER: return "no answer";
+      case TR_REFUSED: return "answered, no code list";
+      case TR_MOVING: return "stop the car first";
+      case TR_CAR_OFF: return "turn the ignition on first";
+      default: return "not checked";
+    }
+  }
+
   TripTotals trip, tank;
   TripTotals drive;  // since the car was started (not saved)
   float odoMiles = 0;  // lifetime miles tracked by the display (for service reminders)
@@ -204,14 +224,52 @@ public:
     c.toUpperCase();
     c.replace(" ", "");
     String r = respond(c);
+    // Headers on: "83 F1 11 <data> <checksum>", as the engine computer (0x11) would send.
+    if (headers && target == OBD_ALL && !c.startsWith("AT") && r.startsWith("4"))
+      r = hex2(0x80 | (r.length() / 2)) + "F111" + r + "00";
     vTaskDelay(pdMS_TO_TICKS(c.startsWith("AT") ? 5 : 45));  // K-line is slow
     r += "\r\r>";
     xStreamBufferSend(rx, r.c_str(), r.length(), 0);
   }
 
 private:
+  static constexpr uint8_t OBD_ALL = 0x33;  // standard requests go to every computer
+  static constexpr uint8_t TCM = 0x18;      // the demo car's transmission computer
   bool opened = false, codes = true;
+  bool headers = false, tcmAwake = false, tcmSession = false;
+  uint8_t target = OBD_ALL;
   uint32_t t0 = 0;
+
+  // The adapter's own commands. Requests go to whichever computer ATSH names.
+  String adapter(const String &c) {
+    if (c == "ATZ") {
+      target = OBD_ALL;
+      headers = tcmAwake = tcmSession = false;
+      return "ELM327 v1.5";
+    }
+    if (c == "ATRV") return "14.1V";
+    if (c == "ATDPN") return "A5";
+    if (c == "ATH1" || c == "ATH0") headers = c == "ATH1";
+    if (c.startsWith("ATSH") && c.length() >= 10) target = strtol(c.substring(6, 8).c_str(), nullptr, 16);
+    if (c == "ATPC") tcmAwake = tcmSession = false;
+    if (c == "ATFI" || c == "ATSI") {
+      tcmAwake = target == TCM;
+      tcmSession = false;
+      return target == TCM || target == OBD_ALL ? "BUS INIT: OK" : "BUS INIT: ...ERROR";
+    }
+    return "OK";
+  }
+
+  // A pretend transmission computer with two stored codes. Like many real
+  // ones, it wants a diagnostic session opened before it lists them.
+  String transmission(const String &c) {
+    if (!tcmAwake) return "NO DATA";
+    if (c == "1081") { tcmSession = true; return "5081"; }
+    if (c == "1800FF00") return tcmSession ? "5802071560074120" : "7F1880";  // P0715 now, P0741 stored
+    if (c == "3E") return "7E";
+    if (c == "82") { tcmAwake = false; return "C2"; }
+    return "7F" + c.substring(0, 2) + "11";
+  }
 
   // Speed (mph) over a repeating 60 s cycle.
   static float speedAt(float t) {
@@ -230,10 +288,9 @@ private:
   }
 
   String respond(const String &c) {
-    if (c == "ATZ") return "ELM327 v1.5";
-    if (c == "ATRV") return "14.1V";
-    if (c == "ATDPN") return "A5";
-    if (c.startsWith("AT")) return "OK";
+    if (c.startsWith("AT")) return adapter(c);
+    if (target == TCM) return transmission(c);
+    if (target != OBD_ALL) return "NO DATA";
     float t = (millis() - t0) / 1000.0f;
     float mph = speedAt(t), accel = speedAt(t + 0.5f) - speedAt(t - 0.5f);
     int kph = lroundf(mph * 1.609f);
@@ -328,6 +385,9 @@ public:
   void clearCodes() {
     if (!readOnly) reqClear = true;
   }
+  // Ask the transmission computer for its own codes. Takes several seconds
+  // with no other readings, so it only runs on request with the car stopped.
+  void readTransmission() { reqTrans = true; }
   void setReadOnly(bool on) {
     readOnly = on;
     prefs.putBool("ro", on);
@@ -406,7 +466,7 @@ private:
   }
 
   volatile bool simulate = false, reqResetTrip = false, reqClear = false, reqReconnect = false, reqTankFull = false;
-  volatile bool reqTankComplete = false, onComputer = false, readOnly = true, detailFocus = false;
+  volatile bool reqTankComplete = false, onComputer = false, readOnly = true, detailFocus = false, reqTrans = false;
   uint32_t lastDetail = 0;
 
   // Car distance counter reference, taken whenever we are in sync with it.
@@ -637,7 +697,192 @@ private:
     }
   }
 
+  // ---------------------------------------------------------- transmission
+  // The transmission computer keeps its own trouble codes; the engine computer
+  // only passes on P0700 ("the transmission has something stored"). It isn't
+  // part of standard OBD-II, so it is asked directly: KWP2000 on the same
+  // K-line, at its own address, with "read trouble codes by status" (service
+  // 0x18). Nothing is ever cleared or written there.
+  //
+  // Its address on this car isn't documented, so the first check tries the
+  // range the standard gives transmissions (0x18-0x1F) and remembers whichever
+  // answers. Every raw reply goes to the event log, so a car that answers
+  // differently can be sorted out from the log.
+
+  static String oneLine(String s) {
+    s.replace("\n", " | ");
+    return s.length() > 110 ? s.substring(0, 110) + "..." : s;
+  }
+
+  // Which computers answer a standard request. With headers on a reply reads
+  // "83 F1 11 41 00 ...": the third byte is the sender.
+  String whoAnswers(uint8_t *addrs, int &n, int max) {
+    String r, list;
+    n = 0;
+    cmd("ATH1", r);
+    if (cmd("0100", r, 6000)) {
+      int start = 0;
+      while (start < (int)r.length()) {
+        int end = r.indexOf('\n', start);
+        if (end < 0) end = r.length();
+        String line = r.substring(start, end);
+        int at = line.indexOf("4100");
+        if ((at == 6 || at == 8) && n < max) {
+          addrs[n++] = hexByte(line, 4);
+          list += " " + line.substring(4, 6);
+        }
+        start = end + 1;
+      }
+    }
+    cmd("ATH0", r);
+    return list.length() ? list : String(" none");
+  }
+
+  // Wake the computer at `addr` and open a session with it.
+  bool wakeModule(uint8_t addr, bool slowInit, String &r) {
+    char c[20];
+    cmd("ATPC", r);  // end the session with the engine computer
+    cmd(slowInit ? "ATSP4" : "ATSP5", r);
+    if (slowInit) {
+      snprintf(c, sizeof(c), "ATIIA%02X", addr);
+      cmd(c, r);
+    }
+    snprintf(c, sizeof(c), "ATSH81%02XF1", addr);  // to addr, from the tester (F1)
+    cmd(c, r);
+    snprintf(c, sizeof(c), "ATWM81%02XF13E", addr);  // keep-alive goes there too
+    cmd(c, r);
+    if (!cmd(slowInit ? "ATSI" : "ATFI", r, 8000)) return false;
+    // "BUS INIT: OK". An adapter without this command ("?") wakes the
+    // computer with the first request instead.
+    return r.indexOf("ERROR") < 0;
+  }
+
+  // Ask an awake computer for its codes. 1 = listed, 0 = no reply, -1 = refused.
+  int askModuleCodes(uint16_t *codes, bool *now, int &n, String &raw) {
+    n = 0;
+    raw = "";
+    for (int attempt = 0; attempt < 3; attempt++) {
+      String r;
+      if (attempt == 1) cmd("1081", r, 3000);  // some want a diagnostic session opened first
+      const char *ask = attempt == 2 ? "1802FF00" : "1800FF00";  // two common forms of the request
+      bool got = cmd(ask, r, 6000);
+      raw += String(raw.length() ? " | " : "") + (attempt == 1 ? "1081+" : "") + ask + ": " + (got ? r : String("(timeout)"));
+      if (!got) return 0;
+      bool refused = false;
+      int start = 0;
+      while (start < (int)r.length()) {
+        int end = r.indexOf('\n', start);
+        if (end < 0) end = r.length();
+        String line = r.substring(start, end);
+        start = end + 1;
+        if (line.startsWith("7F18")) {
+          if (hexByte(line, 4) != 0x78) refused = true;  // 0x78: "wait, working on it"
+          continue;
+        }
+        if (!line.startsWith("58") || line.length() < 4) continue;
+        // 58 <count> then <code high> <code low> <status> for each.
+        int count = hexByte(line, 2);
+        for (int i = 0; i < count && n < 8 && 4 + i * 6 + 6 <= (int)line.length(); i++) {
+          uint16_t c = strtoul(line.substring(4 + i * 6, 8 + i * 6).c_str(), nullptr, 16);
+          if (!c) continue;
+          codes[n] = c;
+          now[n++] = (hexByte(line, 8 + i * 6) & 0x60) == 0x60;  // status bits 5-6: present right now
+        }
+        return 1;
+      }
+      if (!refused) return 0;
+    }
+    return -1;
+  }
+
+  void checkTransmission() {
+    lock();
+    bool moving = !isnan(data.mph) && data.mph > 1;
+    // Not starting never wipes what an earlier check found.
+    if (!moving || data.trans != ObdData::TR_DONE) data.trans = moving ? ObdData::TR_MOVING : ObdData::TR_READING;
+    unlock();
+    if (moving) return;
+    bool quiet = data.simulated;  // the demo car stays out of the event log and settings
+    saveTrips();
+
+    String r;
+    bool slowInit = cmd("ATDPN", r) && r.endsWith("4");  // "A4": KWP2000 with the slow (5-baud) start
+    String proto = r;
+    uint8_t seen[4];
+    int nSeen = 0;
+    String who = whoAnswers(seen, nSeen, 4);
+    if (!quiet) events.add("Transmission check: adapter protocol %s, standard requests answered by%s", proto.c_str(), who.c_str());
+
+    // Remembered address first, then any transmission-range computer that
+    // answered above, then the rest of the range.
+    uint8_t order[12];
+    int nOrder = 0;
+    auto consider = [&](uint8_t a) {
+      for (int i = 0; i < nOrder; i++)
+        if (order[i] == a) return;
+      if (a && nOrder < 12) order[nOrder++] = a;
+    };
+    if (!quiet) consider(prefs.getUChar("tcm", 0));
+    for (int i = 0; i < nSeen; i++)
+      if (seen[i] >= 0x18 && seen[i] <= 0x1F) consider(seen[i]);
+    for (uint8_t a = 0x18; a <= 0x1F; a++) consider(a);
+
+    ObdData::TransState result = ObdData::TR_NO_ANSWER;
+    uint16_t codes[8];
+    bool now[8];
+    int n = 0;
+    uint8_t found = 0;
+    String silent, lastWake;
+    for (int i = 0; i < nOrder && result != ObdData::TR_DONE && link->isOpen(); i++) {
+      char hex[4];
+      snprintf(hex, sizeof(hex), " %02X", order[i]);
+      if (!wakeModule(order[i], slowInit, r)) {
+        silent += hex;
+        lastWake = r;
+        continue;
+      }
+      String raw;
+      int got = askModuleCodes(codes, now, n, raw);
+      if (!quiet) events.add("Transmission at%s: %s", hex, oneLine(raw).c_str());
+      if (got == 0) { silent += hex; continue; }
+      found = order[i];
+      result = got > 0 ? ObdData::TR_DONE : ObdData::TR_REFUSED;
+      cmd("82", r, 2000);  // end the session politely
+    }
+
+    if (!quiet) {
+      if (silent.length()) events.add("Transmission check: no answer at%s (%s)", silent.c_str(), oneLine(lastWake).c_str());
+      if (result == ObdData::TR_DONE) {
+        String list;
+        for (int i = 0; i < n; i++) list += " " + ObdData::dtcText(codes[i]) + (now[i] ? "(now)" : "");
+        events.add("Transmission codes:%s", n ? list.c_str() : " none");
+        if (found != prefs.getUChar("tcm", 0)) prefs.putUChar("tcm", found);
+      } else if (result == ObdData::TR_REFUSED) {
+        events.add("Transmission computer answered at %02X but wouldn't list its codes", found);
+      }
+    }
+    lock();
+    data.trans = result;
+    data.transAddr = found;
+    data.nTransDtcs = result == ObdData::TR_DONE ? n : 0;
+    memcpy(data.transDtcs, codes, sizeof(uint16_t) * data.nTransDtcs);
+    memcpy(data.transNow, now, sizeof(bool) * data.nTransDtcs);
+    unlock();
+
+    // Back to the engine computer: reset the adapter and find it again.
+    if (!(initAdapter() && probeEcu())) {
+      setState(ObdData::NO_ECU);
+      endDrive();
+    }
+  }
+
   void handleRequests() {
+    if (reqTrans && data.state != ObdData::LIVE) {
+      reqTrans = false;
+      lock();
+      if (data.trans != ObdData::TR_DONE) data.trans = ObdData::TR_CAR_OFF;
+      unlock();
+    }
     if (reqResetTrip) {
       reqResetTrip = false;
       events.add("Trip meter reset (was %.1f mi)", data.trip.miles);
@@ -967,6 +1212,11 @@ private:
       }
 
       watchForGaps(data.state);
+      if (reqTrans) {
+        reqTrans = false;
+        checkTransmission();
+        continue;
+      }
       poll();
       vTaskDelay(pdMS_TO_TICKS(10));
     }

@@ -37,6 +37,7 @@ constexpr Key KEYS[] = {
     {"obd", "addr", 's'},      {"obd", "tmi", 'f'},      {"obd", "tgal", 'f'},     {"obd", "tsec", 'f'},
     {"obd", "kmi", 'f'},       {"obd", "kgal", 'f'},     {"obd", "ksec", 'f'},     {"maint", "offset", 'f'},
     {"maint", "items", 's'},   {"maint", "aT", 'f'},     {"maint", "aR", 'f'},     {"obd", "dcal", 'f'},     {"obd", "ogap", 'b'},
+    {"obd", "tcm", 'u'},
 };
 constexpr const char *NAMESPACES[] = {"dash", "obd", "maint"};
 

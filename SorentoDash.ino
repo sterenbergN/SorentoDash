@@ -43,7 +43,7 @@ RfCapture rf;
 History hist;
 Health health;
 
-#define FW_VERSION "1.19"
+#define FW_VERSION "1.20"
 
 // ---------------------------------------------------------------- tuning
 constexpr uint32_t LONG_PRESS_MS = 600;
@@ -517,6 +517,17 @@ String webStateJson() {
     const char *t = dtcDescription(code);
     if (t) c["text"] = t;
   }
+  o["trans"] = d.transText();
+  o["transBusy"] = d.trans == ObdData::TR_READING;
+  JsonArray tcodes = o["transCodes"].to<JsonArray>();
+  for (int i = 0; i < d.nTransDtcs; i++) {
+    JsonObject c = tcodes.add<JsonObject>();
+    String code = ObdData::dtcText(d.transDtcs[i]);
+    c["code"] = code;
+    c["now"] = d.transNow[i];
+    const char *t = dtcDescription(code);
+    if (t) c["text"] = t;
+  }
 
   doc["fw"] = String(FW_VERSION " (" __DATE__ ")");
   JsonObject mo = doc["maint"].to<JsonObject>();
@@ -599,12 +610,22 @@ void webPlay(const String &body) {
   if (track >= 0 && !demoMode) { playingHorn = -1; fx.play(track); }
 }
 
+// Start a transmission check if the car is ready for one; returns what to tell the driver.
+static String startTransCheck() {
+  ObdData d = obd.snapshot();
+  if (d.state != ObdData::LIVE) return "Turn the ignition on first";
+  if (!isnan(d.mph) && d.mph > 1) return "Stop the car first";
+  obd.readTransmission();
+  return "Checking transmission";
+}
+
 void webObd(const String &body) {
   JsonDocument doc;
   if (deserializeJson(doc, body)) return;
   if (doc["resetTrip"] | false) { obd.resetTrip(); tripResetAt = millis(); }
   if (doc["fillUp"].is<float>() && doc["fillUp"].as<float>() > 0) obd.filledUp(doc["fillUp"].as<float>());
   if (doc["clearCodes"] | false) obd.clearCodes();
+  if (doc["readTrans"] | false) startTransCheck();
   if (doc["sim"].is<bool>()) obd.setSimulate(doc["sim"]);
   if (doc["disp"].is<float>() && doc["disp"].as<float>() > 0) obd.setDisplacement(doc["disp"]);
   if (doc["tankCap"].is<float>() && doc["tankCap"].as<float>() > 0) obd.setTankCapacity(doc["tankCap"]);
@@ -1067,16 +1088,26 @@ static void wrapText(const String &s, int x, int y, int width, uint32_t color) {
   text(s.substring(cut + 1), x, y + 8, &fSmall, color);
 }
 
+// The engine computer's codes plus any read from the transmission computer.
+static std::vector<uint16_t> allCodes() {
+  std::vector<uint16_t> v(car.dtcs, car.dtcs + car.nDtcs);
+  for (int i = 0; i < car.nTransDtcs; i++)
+    if (std::find(v.begin(), v.end(), car.transDtcs[i]) == v.end()) v.push_back(car.transDtcs[i]);
+  return v;
+}
+
 static void drawCodesPage() {
   if (drawCarStatus("TROUBLE CODES")) return;
-  uint32_t col = car.nDtcs ? C_WARN : C_GOOD;
+  std::vector<uint16_t> codes = allCodes();
+  int nCodes = codes.size();
+  uint32_t col = nCodes ? C_WARN : C_GOOD;
   arc(RING_IN, RING_OUT, 0, 360, lerpHex(0, col, 0.45f));
   text("TROUBLE CODES", CX, 44, &fSmall, C_DIM);
   if (!car.dtcsRead) {
     text("Reading...", CX, CY, &fBody, C_TEXT);
     return;
   }
-  if (car.nDtcs == 0) {
+  if (nCodes == 0) {
     // Check mark.
     for (int w = -3; w <= 3; w++) {
       canvas.drawLine(CX - 22, CY - 16 + w, CX - 6, CY + 2 + w, rgb(C_GOOD));
@@ -1086,18 +1117,18 @@ static void drawCodesPage() {
     if (car.milOn) text("light on, no stored code", CX, CY + 64, &fSmall, C_DIM);
     return;
   }
-  int n = min(car.nDtcs, 3);
+  int n = min(nCodes, 3);
   int spacing = n == 1 ? 0 : 50;
   int y0 = CY - (n - 1) * spacing / 2 - (n == 1 ? 12 : 8);
   for (int i = 0; i < n; i++) {
-    String code = ObdData::dtcText(car.dtcs[i]);
+    String code = ObdData::dtcText(codes[i]);
     const char *desc = dtcDescription(code);
     int y = y0 + i * spacing;
     text(code, CX, y, n == 1 ? &fTitle : &fBody, C_WARN);
     if (n == 1) wrapText(desc ? desc : "Look this code up online", CX, y + 36, 170, C_TEXT);
     else text(desc ? desc : "", CX, y + 20, &fSmall, C_DIM);
   }
-  if (car.nDtcs > 3) text("+" + String(car.nDtcs - 3) + " more on phone", CX, 196, &fSmall, C_DIM);
+  if (nCodes > 3) text("+" + String(nCodes - 3) + " more on phone", CX, 196, &fSmall, C_DIM);
 }
 
 // ---- engine health
@@ -1642,6 +1673,30 @@ static std::vector<MenuItem> hornsMenu() {
   return v;
 }
 
+// What the last transmission check found, in full.
+static String transDetail() {
+  switch (car.trans) {
+    case ObdData::TR_DONE: {
+      if (!car.nTransDtcs) return "The transmission computer has no codes stored.";
+      String s;
+      for (int i = 0; i < car.nTransDtcs; i++) {
+        String code = ObdData::dtcText(car.transDtcs[i]);
+        const char *d = dtcDescription(code);
+        s += code + (car.transNow[i] ? " (now): " : " (stored): ") + (d ? d : "look this code up online") + "\n\n";
+      }
+      return s;
+    }
+    case ObdData::TR_READING: return "Asking the transmission computer. Readings pause for a few seconds.";
+    case ObdData::TR_NO_ANSWER:
+      return "The transmission computer didn't answer. The event log on the phone page shows what was tried.";
+    case ObdData::TR_REFUSED:
+      return "The transmission computer answered but wouldn't list its codes. The event log on the phone page has its reply.";
+    case ObdData::TR_MOVING: return "Stop the car first: readings pause while the transmission is asked.";
+    case ObdData::TR_CAR_OFF: return "Turn the ignition on and wait for the adapter to connect.";
+    default: return "Not checked yet. Choose Check transmission with the car stopped and the ignition on.";
+  }
+}
+
 static std::vector<MenuItem> codesMenu() {
   std::vector<MenuItem> v;
   if (!car.dtcsRead) v.push_back(MenuItem::info("Not read yet", [] { return String("connect the OBD adapter"); }));
@@ -1652,6 +1707,14 @@ static std::vector<MenuItem> codesMenu() {
     v.push_back(MenuItem::info(code, [desc] { return desc; }));
   }
   if (car.dtcsRead && car.nDtcs == 0) v.push_back(MenuItem::info("No trouble codes", [] { return String("all clear"); }));
+  // The transmission computer keeps its own list, read only when asked.
+  MenuItem tr = MenuItem::info("Transmission", [] { return car.transText(); }, transDetail);
+  tr.valueColor = [] {
+    return car.trans == ObdData::TR_DONE ? (car.nTransDtcs ? C_WARN : C_GOOD) : C_DIM;
+  };
+  v.push_back(tr);
+  v.push_back(MenuItem::act("Check transmission", [] { showToast(startTransCheck()); },
+                            [] { return String("car stopped, up to 30 s"); }));
   if (obd.isReadOnly())
     v.push_back(MenuItem::info("Clearing disabled", [] { return String("read-only mode is on"); }));
   else if (car.nDtcs > 0 || car.milOn)
@@ -1807,7 +1870,8 @@ static std::vector<MenuItem> carMenu() {
                             "Reset trip meter?"));
   v.push_back(MenuItem::sub("Trouble codes", codesMenu, [] {
     if (!car.dtcsRead) return String("not read yet");
-    return String(car.nDtcs ? String(car.nDtcs) + (car.nDtcs == 1 ? " code" : " codes") : String("none"));
+    int n = allCodes().size();
+    return String(n ? String(n) + (n == 1 ? " code" : " codes") : String("none"));
   }));
   MenuItem hm = MenuItem::sub("Engine health", healthMenu, healthSummaryText);
   hm.valueColor = [] {
@@ -2499,6 +2563,11 @@ void loop() {
     float dt = (now - lastFrame) / 1000.0f;
     lastFrame = now;
     car = obd.snapshot();
+    static ObdData::TransState lastTrans = ObdData::TR_NOT_READ;
+    if (car.trans != lastTrans) {  // a transmission check finished (or couldn't start)
+      lastTrans = car.trans;
+      if (car.trans != ObdData::TR_READING && car.trans != ObdData::TR_NOT_READ) showToast("Transmission: " + car.transText());
+    }
     hornWheel.animate(dt);
     if (menu.open()) menu.top().wheel.animate(dt);
     render(now);

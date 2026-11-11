@@ -129,6 +129,8 @@ progress{width:100%;height:10px;accent-color:var(--accent)}
   <div id="calResetRow" class="toggle" style="margin-top:10px" hidden><span class="muted">Only start over if MPG has been clearly wrong for several tanks.</span><button id="resetCal">Start over</button></div></div>
  <div class="set"><label>Trouble codes</label><div id="codes" class="muted">-</div>
   <div style="margin-top:8px;display:flex;justify-content:space-between;align-items:center;gap:10px"><span class="muted">Only clear codes after fixing the problem.</span><button class="danger" id="clear">Clear codes</button></div></div>
+ <div class="set"><label>Transmission codes <span id="transTxt"></span></label><div id="transCodes" class="muted"></div>
+  <div style="margin-top:8px;display:flex;justify-content:space-between;align-items:center;gap:10px"><span class="muted">The transmission computer keeps its own list. Check with the car stopped and the ignition on; readings pause for up to 30 seconds. Details go to the event log.</span><button id="readTrans">Check</button></div></div>
  <div class="set toggle"><b>Engine size (L)</b><input class="num" id="disp" type="number" inputmode="decimal" step="0.1"></div>
  <div class="set toggle"><b>Tank size (gal)</b><input class="num" id="tankCap" type="number" inputmode="decimal" step="0.1"></div>
  <div class="set toggle"><div><b>Read-only mode</b><div class="muted">Never clear trouble codes. Clearing also wipes the engine computer's learned idle and fuel trims.</div></div><button id="ro"></button></div>
@@ -236,6 +238,8 @@ function renderLive(){
  $('calLast').textContent=o.lastFill?'Last fill-up: '+(o.lastFillEst>0&&o.lastFill!=2?'display counted '+f(o.lastFillEst,1)+' gal, pump said '+f(o.lastFillPumped,1)+' gal, ':'')+LF[o.lastFill]+'.':'';
  $('calResetRow').hidden=!(o.calFills>0||Math.abs(o.cal-1)>0.005);
  $('codes').innerHTML=!o.codesRead?'Not read yet':(o.codes.length?o.codes.map(c=>`<div class="code"><b>${c.code}</b><span>${esc(c.text||'Look this code up online')}</span></div>`).join(''):'No trouble codes'+(o.mil?' (check engine light on)':''));
+ $('transTxt').textContent=o.trans||'not checked';$('readTrans').disabled=!!o.transBusy;
+ $('transCodes').innerHTML=(o.transCodes||[]).map(c=>`<div class="code"><b>${c.code}</b><span>${esc(c.text||'Look this code up online')}${c.now?' (active now)':' (stored)'}</span></div>`).join('');
  $('ro').textContent=o.readOnly?'On':'Off';$('ro').className=o.readOnly?'on':'';$('clear').hidden=!!o.readOnly;
  $('sim').textContent=o.sim?'On':'Off';$('sim').className=o.sim?'on':'';
 }
@@ -263,6 +267,9 @@ $('resetTrip').onclick=e=>sure(e.target,()=>post('/api/obd',{resetTrip:true}).th
 $('fill').onclick=()=>{const g=parseFloat($('pumped').value);if(!(g>0)){toast('Enter the gallons pumped');return}
  post('/api/obd',{fillUp:g}).then(()=>{$('pumped').value='';toast('Tank reset & calibrated')})};
 $('clear').onclick=e=>sure(e.target,()=>post('/api/obd',{clearCodes:true}).then(()=>toast('Clearing codes')),'Tap again to clear');
+$('readTrans').onclick=()=>{const o=S.obd;if(o.state!='Connected'){toast('Turn the ignition on first');return}
+ if(o.mph>1){toast('Stop the car first');return}
+ post('/api/obd',{readTrans:true}).then(()=>toast('Checking transmission'))};
 $('disp').onchange=e=>post('/api/obd',{disp:+e.target.value}).then(()=>toast('Saved'));
 $('tankCap').onchange=e=>post('/api/obd',{tankCap:+e.target.value}).then(()=>toast('Saved'));
 $('sim').onclick=()=>{S.obd.sim=!S.obd.sim;renderLive();post('/api/obd',{sim:S.obd.sim})};
