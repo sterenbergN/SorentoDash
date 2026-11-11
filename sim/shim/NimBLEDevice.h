@@ -27,8 +27,16 @@ public:
   const NimBLEAdvertisedDevice *getDevice(uint32_t) const { return nullptr; }
 };
 
+class NimBLEScanCallbacks {
+public:
+  virtual ~NimBLEScanCallbacks() {}
+  virtual void onResult(const NimBLEAdvertisedDevice *) {}
+};
+
 class NimBLEScan {
 public:
+  void setScanCallbacks(NimBLEScanCallbacks *, bool = false) {}
+  bool stop() { return true; }
   void setActiveScan(bool) {}
   void setInterval(uint16_t) {}
   void setWindow(uint16_t) {}

@@ -142,6 +142,10 @@ public:
     scan->setActiveScan(true);
     scan->setInterval(100);
     scan->setWindow(99);
+    // Scan for up to 4 s, but stop the moment the remembered adapter shows up
+    // (usually well under a second) instead of always waiting the full time.
+    strlcpy(watcher.want, preferred.c_str(), sizeof(watcher.want));
+    scan->setScanCallbacks(&watcher, false);
     NimBLEScanResults res = scan->getResults(4000, false);
     const NimBLEAdvertisedDevice *pick = nullptr;
     for (int i = 0; i < res.getCount(); i++) {
@@ -192,6 +196,13 @@ public:
   String address() override { return addr; }
 
 private:
+  // Ends the scan early once the remembered adapter has been heard.
+  struct Watcher : NimBLEScanCallbacks {
+    char want[24] = "";
+    void onResult(const NimBLEAdvertisedDevice *d) override {
+      if (want[0] && !strcmp(want, d->getAddress().toString().c_str())) NimBLEDevice::getScan()->stop();
+    }
+  } watcher;
   bool inited = false;
   NimBLEClient *client = nullptr;
   NimBLERemoteCharacteristic *wr = nullptr;
@@ -219,6 +230,9 @@ public:
   bool isOpen() override { return opened; }
   void close() override { opened = false; }
   float extraMiles = 0;  // pretend driving done while the display wasn't watching
+#ifdef SORENTO_SIM
+  static inline bool trace = false;  // simulator console "elmtrace 1": print every adapter command
+#endif
   void write(const char *cmd) override {
     String c(cmd);
     c.toUpperCase();
@@ -227,6 +241,9 @@ public:
     // Headers on: "83 F1 11 <data> <checksum>", as the engine computer (0x11) would send.
     if (headers && target == OBD_ALL && !c.startsWith("AT") && r.startsWith("4"))
       r = hex2(0x80 | (r.length() / 2)) + "F111" + r + "00";
+#ifdef SORENTO_SIM
+    if (trace) Serial.printf("[elm] %s -> %s\n", c.c_str(), r.c_str());
+#endif
     vTaskDelay(pdMS_TO_TICKS(c.startsWith("AT") ? 5 : 45));  // K-line is slow
     r += "\r\r>";
     xStreamBufferSend(rx, r.c_str(), r.length(), 0);
@@ -242,7 +259,7 @@ private:
 
   // The adapter's own commands. Requests go to whichever computer ATSH names.
   String adapter(const String &c) {
-    if (c == "ATZ") {
+    if (c == "ATZ" || c == "ATWS") {
       target = OBD_ALL;
       headers = tcmAwake = tcmSession = false;
       return "ELM327 v1.5";
@@ -337,6 +354,8 @@ public:
     fuelCal = prefs.getFloat("cal", 1.0f);
     distCal = prefs.getFloat("dcal", 1.0f);
     odoGap = prefs.getBool("ogap", false);
+    proto = prefs.getUChar("proto", 0);
+    if (!isxdigit(proto)) proto = 0;
     loadCalInfo(data);
     simulate = prefs.getBool("sim", false);
     readOnly = prefs.getBool("ro", true);
@@ -475,6 +494,7 @@ private:
   volatile float reqFillUp = 0, reqCal = 0, reqLevel = 0;  // reqLevel: percent + 1 (0 = none)
   volatile float displacement = 3.5f, fuelCal = 1.0f, distCal = 1.0f;
   bool odoGap = false;
+  char proto = 0;  // adapter protocol number the car answered on last time ('5'), 0 = not known
 
   uint32_t supported[3] = {0, 0, 0};
   uint32_t lastFast = 0, lastSlow = 0, lastMil = 0, lastSave = 0, lastLive = 0;
@@ -614,11 +634,31 @@ private:
 
   bool initAdapter() {
     String r;
-    cmd("ATZ", r, 2500);
+    // A warm start resets everything like ATZ but skips the adapter's
+    // self-test, about a second faster. Adapters without it get the full reset.
+    if (!(cmd("ATWS", r, 2500) && r.indexOf("ELM") >= 0)) cmd("ATZ", r, 2500);
     vTaskDelay(pdMS_TO_TICKS(300));
     if (!cmd("ATE0", r)) return false;
-    for (const char *c : {"ATL0", "ATS0", "ATH0", "ATAT1", "ATSP0"}) cmd(c, r);
+    for (const char *c : {"ATL0", "ATS0", "ATH0", "ATAT1"}) cmd(c, r);
+    // Start with the protocol this car answered on last time: searching
+    // through all of them takes about 5 s on every connection. "A" keeps the
+    // search as a fallback if the car doesn't answer on it.
+    char sp[8];
+    snprintf(sp, sizeof(sp), "ATSPA%c", proto);
+    if (!proto || data.simulated || !cmd(sp, r) || r.indexOf("OK") < 0) cmd("ATSP0", r);
     return true;
+  }
+
+  // Note which protocol the adapter settled on ("A5": found by searching, 5).
+  void rememberProtocol() {
+    if (data.simulated) return;
+    String r;
+    if (!cmd("ATDPN", r) || !r.length()) return;
+    char p = r[r.length() - 1];
+    if (!isxdigit(p) || p == '0' || p == proto) return;
+    proto = p;
+    prefs.putUChar("proto", p);
+    events.add("Car's protocol remembered (%c): quicker start next time", p);
   }
 
   // Ask the ECU which PIDs it supports; fails while the ignition is off.
@@ -638,6 +678,7 @@ private:
     fails = 0;
     lastMil = 0;
     lastSlow = 0;
+    rememberProtocol();
     lastFast = millis();
     return true;
   }

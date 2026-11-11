@@ -43,7 +43,7 @@ RfCapture rf;
 History hist;
 Health health;
 
-#define FW_VERSION "1.20"
+#define FW_VERSION "1.21"
 
 // ---------------------------------------------------------------- tuning
 constexpr uint32_t LONG_PRESS_MS = 600;
@@ -2324,6 +2324,7 @@ static bool handleConsole(int32_t &det, Press &btn, int &swipe) {
   }
 #ifdef SORENTO_SIM
   else if (s == "healthreset") health.relearn();
+  else if (s == "elmtrace 1" || s == "elmtrace 0") SimElm::trace = s.endsWith("1");  // print the demo adapter's traffic
   else if (s.startsWith("addmiles ")) obd.addTestMiles(s.substring(9).toFloat());
   else if (s.startsWith("healthtest ")) {
     String a = s.substring(11);
