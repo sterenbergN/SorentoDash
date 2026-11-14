@@ -21,6 +21,8 @@ public:
   int tint = 1;  // horn screen background: 0 black, 1 subtle, 2 bold
   int dimAfterSec = 60;  // dim the screen after this long without input (0 = never)
   int dimPct = 20;       // brightness when dimmed (never brighter than the normal setting)
+  int homePage = 0;      // car page shown at start-up: the one that was up last
+  int hiddenPages = 0;   // bit per car page left out of the home carousel
   String selectedKey;
   std::vector<HornMeta> horns;  // user order
   std::vector<String> cachedFiles;
@@ -33,6 +35,8 @@ public:
     tint = p.getInt("tint", tint);
     dimAfterSec = p.getInt("dimAfter", dimAfterSec);
     dimPct = p.getInt("dimPct", dimPct);
+    homePage = p.getInt("page", homePage);
+    hiddenPages = p.getInt("pages", hiddenPages);
     selectedKey = p.getString("sel", "");
     parseHorns(p.getString("horns", ""));
     cachedFiles = split(p.getString("files", ""), '\n');
@@ -46,6 +50,12 @@ public:
     p.putInt("dimAfter", dimAfterSec);
     p.putInt("dimPct", dimPct);
   }
+  void saveHomePage(int page) {
+    if (page == homePage) return;
+    homePage = page;
+    p.putInt("page", page);
+  }
+  void saveHiddenPages() { p.putInt("pages", hiddenPages); }
   void saveSelected(const String &key) {
     if (key == selectedKey) return;
     selectedKey = key;

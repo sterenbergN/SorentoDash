@@ -43,7 +43,7 @@ RfCapture rf;
 History hist;
 Health health;
 
-#define FW_VERSION "1.21"
+#define FW_VERSION "1.22"
 
 // ---------------------------------------------------------------- tuning
 constexpr uint32_t LONG_PRESS_MS = 600;
@@ -262,6 +262,8 @@ int otaPct = 0;
 bool otaOk = false;
 
 // Short confirmation pill drawn over any screen.
+const char *bigAlert = nullptr;    // warning currently shown full-screen
+const char *ackedAlert = nullptr;  // warning the driver has dismissed (badge only from then on)
 String toastText, pendingToast;  // pendingToast: a number editor's save can say more than "Saved"
 uint32_t toastUntil = 0;
 static void showToast(const String &t) {
@@ -298,8 +300,42 @@ static void rebuildHorns() {
   playingHorn = -1;
 }
 
+// ---- home pages
+static const char *PAGE_NAMES[CP_COUNT] = {"Economy", "Trip & range", "Engine", "Trouble codes", "Engine health", "Service", "History"};
+static Health::Overview healthOverview();
+
+// Pages can be left out of the home carousel (Display > Home pages). A hidden
+// page still appears while it has something to report.
+static bool pageShown(int p) {
+  if (!(cfg.hiddenPages & (1 << p))) return true;
+  if (p == CP_CODES) return car.nDtcs + car.nTransDtcs > 0 || car.milOn;
+  if (p == CP_HEALTH) return healthOverview().check > 0;
+  return false;
+}
+
+// The next shown page from `from` in direction dir. Off the end it wraps, or
+// returns -1 when wrap is false (a swipe goes on to the horns from there).
+static int nextPage(int from, int dir, bool wrap) {
+  for (int i = 1; i <= CP_COUNT; i++) {
+    int p = from + dir * i;
+    if (p < 0 || p >= CP_COUNT) {
+      if (!wrap) return -1;
+      p = (p % CP_COUNT + CP_COUNT) % CP_COUNT;
+    }
+    if (pageShown(p)) return p;
+  }
+  return wrap ? from : -1;
+}
+
+#ifdef SORENTO_SIM
+const char *simAlert = nullptr;  // simulator console "alert hot|charge|volts|off"
+#endif
+
 // Engine problems worth interrupting for (the dash already shows the MIL).
 static const char *carAlert(const ObdData &d) {
+#ifdef SORENTO_SIM
+  if (simAlert) return simAlert;
+#endif
   if (!d.live()) return nullptr;
   if (!isnan(d.coolantF) && d.coolantF >= 230) return "ENGINE HOT";
   if (!isnan(d.volts) && !isnan(d.rpm) && d.rpm > 500 && d.volts < 12.6f) return "NOT CHARGING";
@@ -375,11 +411,13 @@ static void backOrHome() {
 // Horns <-> car pages as one carousel (for swipes).
 static void stepPage(int dir) {
   if (mode == MODE_HORNS) {
-    carPage = dir > 0 ? 0 : CP_COUNT - 1;
+    int p = nextPage(dir > 0 ? -1 : CP_COUNT, dir, false);  // first or last shown page
+    if (p >= 0) carPage = p;
     enterMode(MODE_CAR);
   } else if (mode == MODE_CAR) {
-    carPage += dir;
-    if (carPage < 0 || carPage >= CP_COUNT) enterMode(MODE_HORNS);
+    int p = nextPage(carPage, dir, false);
+    if (p < 0) enterMode(MODE_HORNS);
+    else carPage = p;
   } else if (mode == MODE_HISTORY) {
     histChart = ((histChart + dir) % HIST_CHARTS + HIST_CHARTS) % HIST_CHARTS;
   } else if (mode == MODE_DETAIL) {
@@ -986,9 +1024,14 @@ static String fmt(float v, int decimals) { return isnan(v) ? String("--") : Stri
 
 static void drawPageDots() {
   constexpr int GAP = 12;
-  int x0 = CX - (CP_COUNT - 1) * GAP / 2;
+  // One dot per page in the carousel (plus the current one, if it's a hidden page opened another way).
+  int shown[CP_COUNT], n = 0;
   for (int i = 0; i < CP_COUNT; i++)
-    canvas.fillSmoothCircle(x0 + i * GAP, 222, i == carPage ? 3 : 2, rgb(i == carPage ? C_TEXT : C_TICK));
+    if (pageShown(i) || i == carPage) shown[n++] = i;
+  if (n < 2) return;
+  int x0 = CX - (n - 1) * GAP / 2;
+  for (int i = 0; i < n; i++)
+    canvas.fillSmoothCircle(x0 + i * GAP, 222, shown[i] == carPage ? 3 : 2, rgb(shown[i] == carPage ? C_TEXT : C_TICK));
 }
 
 // Two stats side by side near the bottom of a gauge page.
@@ -1074,6 +1117,15 @@ static void drawEnginePage() {
 }
 
 // Word-wrap into at most two lines that fit `width`.
+// Small text cut to fit a width, ending in "..." when it had to be shortened.
+static String fitText(String s, int width) {
+  canvas.setFont(&fSmall);
+  if (canvas.textWidth(s) <= width) return s;
+  while (s.length() > 1 && canvas.textWidth(s + "...") > width) s.remove(s.length() - 1);
+  s.trim();
+  return s + "...";
+}
+
 static void wrapText(const String &s, int x, int y, int width, uint32_t color) {
   canvas.setFont(&fSmall);
   if (canvas.textWidth(s) <= width) { text(s, x, y, &fSmall, color); return; }
@@ -1102,7 +1154,8 @@ static void drawCodesPage() {
   int nCodes = codes.size();
   uint32_t col = nCodes ? C_WARN : C_GOOD;
   arc(RING_IN, RING_OUT, 0, 360, lerpHex(0, col, 0.45f));
-  text("TROUBLE CODES", CX, 44, &fSmall, C_DIM);
+  // A warning or service badge takes the title's place (they'd overlap).
+  if (!carAlert(car) && serviceDue() < 0) text("TROUBLE CODES", CX, 44, &fSmall, C_DIM);
   if (!car.dtcsRead) {
     text("Reading...", CX, CY, &fBody, C_TEXT);
     return;
@@ -1126,7 +1179,7 @@ static void drawCodesPage() {
     int y = y0 + i * spacing;
     text(code, CX, y, n == 1 ? &fTitle : &fBody, C_WARN);
     if (n == 1) wrapText(desc ? desc : "Look this code up online", CX, y + 36, 170, C_TEXT);
-    else text(desc ? desc : "", CX, y + 20, &fSmall, C_DIM);
+    else text(fitText(desc ? desc : "", chordWidth(y + 20, 40)), CX, y + 20, &fSmall, C_DIM);
   }
   if (nCodes > 3) text("+" + String(nCodes - 3) + " more on phone", CX, 196, &fSmall, C_DIM);
 }
@@ -1387,7 +1440,7 @@ static void drawHistoryPage() {
   if (!t.drives) {
     drawGaugeArc(0, 0);
     text("No drives yet", CX, CY - 6, &fBody, C_TEXT);
-    text("recorded with the OBD adapter", CX, CY + 18, &fSmall, C_DIM);
+    wrapText("recorded with the OBD adapter", CX, CY + 24, chordWidth(CY + 24, 70), C_DIM);
     return;
   }
   float mpg = t.gallons > 0.1f ? t.miles / t.gallons : NAN;
@@ -1549,6 +1602,22 @@ static void drawCarScreen() {
   drawPageDots();
 }
 
+// A warning over the whole screen: what's wrong, the reading, what to do.
+static void drawBigAlert(uint32_t now) {
+  canvas.fillScreen(TFT_BLACK);
+  float pulse = 0.7f + 0.3f * sinf(now / 260.0f);
+  arc(RING_IN - 4, RING_OUT, 0, 360, lerpHex(0, C_BAD, pulse));
+  bool hot = !strcmp(bigAlert, "ENGINE HOT");
+  String reading = hot ? fmt(car.coolantF, 0) + "\xC2\xB0" : fmt(car.volts, 1);
+  const char *unit = hot ? "COOLANT" : "VOLTS";
+  const char *advice = hot ? "Stop when it's safe" : !strcmp(bigAlert, "NOT CHARGING") ? "Battery isn't charging" : "Charging voltage too high";
+  text(bigAlert, CX, 62, &fBody, C_BAD);
+  text(reading, CX, CY - 4, &fHuge, C_TEXT);
+  text(unit, CX, CY + 30, &fSmall, C_DIM);
+  text(advice, CX, CY + 54, &fSmall, C_TEXT);
+  text("press to dismiss", CX, 204, &fSmall, C_DIM);
+}
+
 static void render(uint32_t now) {
   if (mode != MODE_HORNS) canvas.fillScreen(TFT_BLACK);
   switch (mode) {
@@ -1567,6 +1636,7 @@ static void render(uint32_t now) {
     case MODE_TEXT: drawTextScreen(); break;
   }
   drawToast();
+  if (bigAlert) drawBigAlert(now);
   canvas.pushSprite(0, 0);
 }
 
@@ -1938,6 +2008,27 @@ static std::vector<MenuItem> serviceMenu() {
   return v;
 }
 
+// Which car pages the knob and swipes step through on the home screen.
+static std::vector<MenuItem> homePagesMenu() {
+  std::vector<MenuItem> v;
+  for (int i = 0; i < CP_COUNT; i++) {
+    MenuItem m = MenuItem::choice(PAGE_NAMES[i], [i] { return String(cfg.hiddenPages & (1 << i) ? "Hidden" : "Shown"); }, [i] {
+      int next = cfg.hiddenPages ^ (1 << i);
+      if (next == (1 << CP_COUNT) - 1) { showToast("Keep at least one page"); return; }
+      cfg.hiddenPages = next;
+      cfg.saveHiddenPages();
+    });
+    m.valueColor = [i] { return cfg.hiddenPages & (1 << i) ? C_DIM : C_GOOD; };
+    v.push_back(m);
+  }
+  v.push_back(MenuItem::info("About hidden pages", [] { return String("still appear when needed"); }, [] {
+    return String("Hidden pages are skipped when you turn the knob or swipe.\n\nTrouble codes and Engine health come "
+                  "back by themselves while they have something to report, and everything stays reachable from "
+                  "Settings > Car and Service.");
+  }));
+  return v;
+}
+
 static std::vector<MenuItem> rootMenu() {
   std::vector<MenuItem> v;
   v.push_back(MenuItem::sub("Sound", [] {
@@ -1961,6 +2052,11 @@ static std::vector<MenuItem> rootMenu() {
                          }),
         MenuItem::number("Dim brightness", [] { return (float)cfg.dimPct; },
                          [](float p) { cfg.dimPct = p; cfg.saveDim(); }, 10, 100, 5, 0, "%"),
+        MenuItem::sub("Home pages", homePagesMenu, [] {
+          int n = 0;
+          for (int i = 0; i < CP_COUNT; i++) n += !(cfg.hiddenPages & (1 << i));
+          return String(n) + " of " + String((int)CP_COUNT) + " shown";
+        }),
         MenuItem::choice("Horn background", [] { return String(TINTS[cfg.tint]); },
                          [] { cfg.tint = (cfg.tint + 1) % 3; cfg.saveTint(); }),
         MenuItem::toggle("LED ring", [] { return cfg.leds; }, [] { cfg.leds = !cfg.leds; cfg.saveLeds(); }),
@@ -2096,7 +2192,7 @@ static void handleInput(int32_t det, Press btn, uint32_t now) {
       break;
 
     case MODE_CAR:
-      if (det) carPage = ((carPage + det) % CP_COUNT + CP_COUNT) % CP_COUNT;
+      for (int i = 0; i < abs(det); i++) carPage = nextPage(carPage, det > 0 ? 1 : -1, true);
       if (btn == PRESS_SHORT) openDetails();
       if (btn == PRESS_LONG) enterMode(MODE_MENU);
       if (btn == PRESS_DOUBLE) enterMode(MODE_HORNS);
@@ -2324,6 +2420,8 @@ static bool handleConsole(int32_t &det, Press &btn, int &swipe) {
   }
 #ifdef SORENTO_SIM
   else if (s == "healthreset") health.relearn();
+  else if (s.startsWith("alert "))  // fake a warning: alert hot|charge|volts|off
+    simAlert = s.endsWith("hot") ? "ENGINE HOT" : s.endsWith("charge") ? "NOT CHARGING" : s.endsWith("volts") ? "HIGH VOLTAGE" : nullptr;
   else if (s == "elmtrace 1" || s == "elmtrace 0") SimElm::trace = s.endsWith("1");  // print the demo adapter's traffic
   else if (s.startsWith("addmiles ")) obd.addTestMiles(s.substring(9).toFloat());
   else if (s.startsWith("healthtest ")) {
@@ -2410,6 +2508,9 @@ void setup() {
   digitalWrite(PIN_LCD_PWR2, HIGH);
 
   cfg.begin();
+  // Open on the page that was up last: the display restarts with every engine start.
+  carPage = constrain(cfg.homePage, 0, CP_COUNT - 1);
+  if (!pageShown(carPage)) carPage = max(0, nextPage(-1, 1, false));
 
   lcd.init();
   lcd.fillScreen(TFT_BLACK);
@@ -2519,9 +2620,28 @@ void loop() {
   if (det || btn || swipe) {
     lastInput = now;
     if (dimmed) { dimmed = false; setBacklight(backlightLevel()); }
-    if (det || btn) handleInput(det, btn, now);
+    if (bigAlert) {
+      // Any input acknowledges a full-screen warning (and does nothing else).
+      ackedAlert = bigAlert;
+      bigAlert = nullptr;
+    } else {
+      if (det || btn) handleInput(det, btn, now);
+      if (swipe) stepPage(swipe);
+    }
     if (det) lastDetentAt = now;
-    if (swipe) stepPage(swipe);
+  }
+
+  // Remember the home page once it has stayed up a few seconds (not every
+  // page passed while turning, and nothing is saved right after power-up).
+  static int pagePending = -1;
+  static uint32_t pageSince = 0;
+  if (mode != MODE_CAR || carPage == cfg.homePage) {
+    pagePending = -1;
+  } else if (carPage != pagePending) {
+    pagePending = carPage;
+    pageSince = now;
+  } else if (now - pageSince > 8000 && now > 10000) {
+    cfg.saveHomePage(carPage);
   }
 
   // Settings stay open until left; only the horn screen goes back home by itself.
@@ -2548,6 +2668,23 @@ void loop() {
     if (now - alertClearSince > 30000) {
       events.add("Warning over: %s", loggedAlert);
       loggedAlert = nullptr;
+    }
+  }
+
+  // A warning that has lasted 5 s takes over the whole screen until any input
+  // acknowledges it; the small badge stays after that. It can take over again
+  // only once the warning has been gone long enough to be logged as over.
+  static uint32_t alertSince = 0;
+  const char *alertNow = carAlert(car);
+  if (!alertNow) {
+    alertSince = 0;
+    bigAlert = nullptr;
+    if (!loggedAlert) ackedAlert = nullptr;
+  } else {
+    if (!alertSince) alertSince = now;
+    if (alertNow != ackedAlert && now - alertSince > 5000 && mode != MODE_OTA) {
+      if (!bigAlert && dimmed) { dimmed = false; setBacklight(backlightLevel()); }
+      bigAlert = alertNow;
     }
   }
 
