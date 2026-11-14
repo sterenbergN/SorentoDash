@@ -35,7 +35,17 @@ static const char SETUP_PAGE[] PROGMEM = R"HTML(<!doctype html>
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font:16px/1.4 -apple-system,system-ui,Segoe UI,Roboto,sans-serif;padding:16px;max-width:560px;margin:auto}
 h1{font-size:22px;margin:4px 0 2px}
-.sub{color:var(--dim);font-size:14px;margin-bottom:18px}
+header.top{display:flex;justify-content:space-between;align-items:center;gap:10px}
+header.top .btn{height:32px;font-size:13.5px;color:var(--dim)}
+#tabs{position:sticky;top:0;z-index:5;display:flex;gap:6px;overflow-x:auto;background:var(--bg);padding:10px 0;margin-bottom:6px;scrollbar-width:none}
+#tabs::-webkit-scrollbar{display:none}
+#tabs button{flex:1 0 auto;display:inline-flex;align-items:center;justify-content:center;height:36px;min-width:0;border-radius:18px;padding:0 9px;font-size:13.5px;background:var(--card);border:1px solid var(--line);color:var(--dim);text-decoration:none}
+#tabs button.on{background:var(--text);border-color:var(--text);color:#111;font-weight:600}
+#tabs button.flag::after{content:'';width:7px;height:7px;border-radius:50%;background:var(--warn);margin-left:6px}
+section>h2:first-child{margin-top:8px}
+.note{color:var(--dim);font-size:13px;margin:0 0 8px}
+.act{display:flex;justify-content:flex-end;gap:10px;margin-top:10px}
+.sub{color:var(--dim);font-size:14px;margin:0 0 12px}
 h2{font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);margin:22px 0 8px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden}
 .row{display:flex;align-items:center;gap:8px;padding:10px 10px;border-top:1px solid var(--line)}
@@ -91,21 +101,10 @@ progress{width:100%;height:10px;accent-color:var(--accent)}
 .status b{color:var(--ok)}
 .status b.off{color:var(--warn)}
 </style></head><body>
-<h1>Sorento Dash</h1>
-<a href="/stats" style="display:block;background:#16181c;border:1px solid #26292f;border-radius:14px;padding:12px 14px;margin:10px 0 14px;color:#f3f4f6;text-decoration:none;font-weight:600">Driving stats &amp; charts <span style="float:right;color:#8b919a">&rarr;</span></a>
-<div class="sub">Tap a name to rename it, or the dot to pick its color. Changes save automatically. <span class="status" id="status"></span></div>
-<h2>Horns</h2>
-<div class="card" id="horns"></div>
-<h2>Sound &amp; display</h2>
-<div class="card">
- <div class="set"><label>Horn volume <span id="volv"></span></label><input type="range" id="vol" min="0" max="100" step="5"></div>
- <div class="set"><label>Screen brightness <span id="brv"></span></label><input type="range" id="br" min="10" max="100" step="5"></div>
- <div class="set toggle"><div><b>Dim after</b><div class="muted">Dims the screen when the knob hasn't been touched for this long.</div></div><select id="dimAfter"><option value="15">15 sec</option><option value="30">30 sec</option><option value="60">1 min</option><option value="120">2 min</option><option value="300">5 min</option><option value="600">10 min</option><option value="0">Never</option></select></div>
- <div class="set"><label>Dimmed brightness <span id="dimv"></span></label><input type="range" id="dim" min="10" max="100" step="5"></div>
- <div class="set toggle"><b>Horn screen background</b><select id="tint"><option value="0">Black</option><option value="1">Subtle color</option><option value="2">Bold color</option></select></div>
- <div class="set toggle"><b>LED ring</b><button id="leds"></button></div>
-</div>
-<h2>Car (OBD-II)</h2>
+<header class="top"><h1>Sorento Dash</h1><a class="btn" href="/stats">Stats &amp; charts &rarr;</a></header>
+<nav id="tabs"><button data-tab="car">Car</button><button data-tab="horns">Horns</button><button data-tab="display">Display</button><button data-tab="health">Health</button><button data-tab="service">Service</button><button data-tab="system">System</button></nav>
+
+<section data-tab="car">
 <div class="card">
  <div class="set"><b id="obdState"></b><div class="muted" id="obdAdapter"></div></div>
  <div class="grid">
@@ -114,71 +113,117 @@ progress{width:100%;height:10px;accent-color:var(--accent)}
   <div><small>Coolant</small><b id="lCool">-</b></div>
   <div><small>Battery</small><b id="lVolt">-</b></div>
  </div>
+</div>
+<h2>Trip</h2>
+<div class="card">
  <div class="set"><label>Trip meter <span id="tripTxt"></span></label>
-  <div class="muted" style="margin-bottom:8px">Like the trip odometer on the dash. Resetting it doesn't affect fill-ups, calibration or history.</div>
+  <p class="note">Like the trip odometer on the dash. Resetting it doesn't affect fill-ups, calibration or history.</p>
   <div class="toggle"><span class="muted" id="tripMore"></span><button id="resetTrip">Reset trip</button></div></div>
- <div class="set"><label>Since fill-up <span id="tankTxt"></span></label>
-  <div class="muted" style="margin-bottom:8px">Fill until the pump clicks off, then enter the gallons pumped.</div>
-  <div class="toggle"><input class="num" id="pumped" type="number" inputmode="decimal" step="0.1" min="0" placeholder="Gallons"><button id="fill">I filled up</button></div>
-  <div class="muted" style="margin:12px 0 8px">Not at the pump? Set the level from the fuel gauge to get a range now.</div>
+</div>
+<h2>Fuel</h2>
+<div class="card">
+ <div class="set"><label>Since fill-up</label><div id="tankTxt" style="margin-bottom:6px"></div>
+  <p class="note">Fill until the pump clicks off, then enter the gallons pumped.</p>
+  <div class="toggle"><input class="num" id="pumped" type="number" inputmode="decimal" step="0.1" min="0" placeholder="Gallons"><button class="play" id="fill">I filled up</button></div>
+  <p class="note" style="margin-top:14px">Not at the pump? Set the level from the fuel gauge to get a range now.</p>
   <div class="toggle"><select id="level"><option value="100">Full</option><option value="87.5">7/8</option><option value="75">3/4</option><option value="62.5">5/8</option><option value="50" selected>1/2</option><option value="37.5">3/8</option><option value="25">1/4</option><option value="12.5">1/8</option><option value="5">Empty</option></select><button id="setLevel">Set level</button></div></div>
  <div class="set"><label>MPG accuracy <span id="calTxt"></span></label>
   <div class="muted" id="calStep"></div>
   <div class="muted" id="calLast" style="margin-top:6px"></div>
-  <div id="incompleteRow" style="margin-top:8px" hidden><div class="toggle"><span class="muted" style="color:var(--warn)">Some driving since the last fill-up wasn't tracked (the display ran 5+ minutes without the adapter), so the next fill-up won't adjust the calibration.</span><button id="tankOk">It was tracked</button></div></div>
-  <div id="calResetRow" class="toggle" style="margin-top:10px" hidden><span class="muted">Only start over if MPG has been clearly wrong for several tanks.</span><button id="resetCal">Start over</button></div></div>
- <div class="set"><label>Trouble codes</label><div id="codes" class="muted">-</div>
-  <div style="margin-top:8px;display:flex;justify-content:space-between;align-items:center;gap:10px"><span class="muted">Only clear codes after fixing the problem.</span><button class="danger" id="clear">Clear codes</button></div></div>
- <div class="set"><label>Transmission codes <span id="transTxt"></span></label><div id="transCodes" class="muted"></div>
-  <div style="margin-top:8px;display:flex;justify-content:space-between;align-items:center;gap:10px"><span class="muted">The transmission computer keeps its own list. Check with the car stopped and the ignition on; readings pause for up to 30 seconds. Details go to the event log.</span><button id="readTrans">Check</button></div></div>
- <div class="set toggle"><b>Engine size (L)</b><input class="num" id="disp" type="number" inputmode="decimal" step="0.1"></div>
- <div class="set toggle"><b>Tank size (gal)</b><input class="num" id="tankCap" type="number" inputmode="decimal" step="0.1"></div>
- <div class="set toggle"><div><b>Read-only mode</b><div class="muted">Never clear trouble codes. Clearing also wipes the engine computer's learned idle and fuel trims.</div></div><button id="ro"></button></div>
- <div class="set toggle"><div><b>Demo car</b><div class="muted">Simulated data, for trying the car screens without an adapter.</div></div><button id="sim"></button></div>
- <div class="set toggle"><span class="muted">Remembered adapter</span><button id="forget">Forget</button></div>
+  <div id="incompleteRow" style="margin-top:10px" hidden><p class="note" style="color:var(--warn)">Some driving since the last fill-up wasn't tracked (the display ran 5+ minutes without the adapter), so the next fill-up won't adjust the calibration.</p><div class="act"><button id="tankOk">It was tracked</button></div></div>
+  <div id="calResetRow" style="margin-top:10px" hidden><p class="note">Only start over if MPG has been clearly wrong for several tanks.</p><div class="act"><button id="resetCal">Start over</button></div></div></div>
 </div>
-<h2>Engine health</h2>
+<h2>Trouble codes</h2>
+<div class="card">
+ <div class="set"><label>Engine</label><div id="codes" class="muted">-</div>
+  <div class="toggle" id="clearRow" style="margin-top:10px"><span class="muted">Only clear codes after fixing the problem.</span><button class="danger" id="clear">Clear codes</button></div></div>
+ <div class="set"><label>Transmission <span id="transTxt"></span></label><div id="transCodes" class="muted"></div>
+  <p class="note">The transmission computer keeps its own list. Check with the car stopped and the ignition on; readings pause for up to 30 seconds, and the details go to the event log.</p>
+  <div class="act"><button id="readTrans">Check transmission</button></div></div>
+</div>
+</section>
+
+<section data-tab="horns">
+<p class="sub">Tap a name to rename it, or the dot to pick its color. Changes save automatically. <span class="status" id="status"></span></p>
+<div class="card" id="horns"></div>
+<h2>Sound</h2>
+<div class="card">
+ <div class="set"><label>Horn volume <span id="volv"></span></label><input type="range" id="vol" min="0" max="100" step="5"></div>
+</div>
+</section>
+
+<section data-tab="display">
+<div class="card">
+ <div class="set"><label>Screen brightness <span id="brv"></span></label><input type="range" id="br" min="10" max="100" step="5"></div>
+ <div class="set toggle"><div><b>Dim after</b><div class="muted">Dims the screen when the knob hasn't been touched for this long.</div></div><select id="dimAfter"><option value="15">15 sec</option><option value="30">30 sec</option><option value="60">1 min</option><option value="120">2 min</option><option value="300">5 min</option><option value="600">10 min</option><option value="0">Never</option></select></div>
+ <div class="set"><label>Dimmed brightness <span id="dimv"></span></label><input type="range" id="dim" min="10" max="100" step="5"></div>
+ <div class="set toggle"><b>Horn screen background</b><select id="tint"><option value="0">Black</option><option value="1">Subtle color</option><option value="2">Bold color</option></select></div>
+ <div class="set toggle"><b>LED ring</b><button id="leds"></button></div>
+</div>
+<h2>Home pages</h2>
+<p class="sub">The car pages the knob and swipes step through. Trouble codes and Engine health come back by themselves while they have something to report.</p>
+<div class="card" id="pages"></div>
+</section>
+
+<section data-tab="health">
 <div class="card">
  <div class="set"><div class="muted" id="healthIntro"></div></div>
  <div id="health"></div>
  <div class="set toggle"><span class="muted">After a repair, let it learn what's normal again.</span><button id="relearn">Relearn</button></div>
 </div>
-<h2>Service reminders</h2>
+</section>
+
+<section data-tab="service">
 <div class="card">
  <div class="set"><label>Odometer <span id="odoNow"></span></label>
-  <div class="muted" style="margin-bottom:8px">Enter the odometer reading once; the display counts miles from OBD after that.</div>
+  <p class="note">Enter the odometer reading once; the display counts miles from OBD after that.</p>
   <div class="toggle"><input class="num" id="odo" type="number" inputmode="numeric" placeholder="Miles" style="width:130px"><button id="setOdo">Set</button></div></div>
  <div class="set"><label>Speed correction <span id="scNow"></span></label>
-  <div class="muted" style="margin-bottom:8px" id="scHelp"></div>
+  <p class="note" id="scHelp"></p>
   <div class="toggle"><span class="muted">Set by hand (%), e.g. from GPS: display 60 mph, GPS 61 = +1.7</span><input class="num" id="sc" type="number" inputmode="decimal" step="0.1" style="width:80px"></div></div>
+</div>
+<h2>Reminders</h2>
+<div class="card">
  <div id="svc"></div>
- <div class="set" style="text-align:right"><button id="addSvc">+ Add item</button></div>
+ <div class="set act" style="margin-top:0"><button id="addSvc">+ Add item</button></div>
+</div>
+</section>
+
+<section data-tab="system">
+<h2>Car setup</h2>
+<div class="card">
+ <div class="set toggle"><b>Engine size (L)</b><input class="num" id="disp" type="number" inputmode="decimal" step="0.1"></div>
+ <div class="set toggle"><b>Tank size (gal)</b><input class="num" id="tankCap" type="number" inputmode="decimal" step="0.1"></div>
+ <div class="set toggle"><div><b>Read-only mode</b><div class="muted">Never clear trouble codes. Clearing also wipes the engine computer's learned idle and fuel trims.</div></div><button id="ro"></button></div>
+ <div class="set toggle"><div><b>Demo car</b><div class="muted">Simulated data, for trying the car screens without an adapter.</div></div><button id="sim"></button></div>
+ <div class="set toggle"><div><b>OBD adapter</b><div class="muted">Forget the remembered adapter to pair a different one.</div></div><button id="forget">Forget</button></div>
 </div>
 <h2>Backup</h2>
 <div class="card">
- <div class="set"><div class="muted" style="margin-bottom:10px">Saves every setting, horn name, MPG calibration, tank and trip, service record and the drive history in one file on your phone.</div>
+ <div class="set"><p class="note">Saves every setting, horn name, MPG calibration, tank and trip, service record and the drive history in one file on your phone.</p>
   <a class="btn" id="backup" href="/api/backup" download="sorento-dash-backup.json">Download backup</a>
-  <div class="muted" style="margin-top:8px">If nothing downloads, open <b>192.168.4.1</b> in your phone's browser (Safari or Chrome) while joined to the display's Wi-Fi, and try there.</div></div>
+  <p class="note" style="margin:10px 0 0">If nothing downloads, open <b>192.168.4.1</b> in your phone's browser (Safari or Chrome) while joined to the display's Wi-Fi, and try there.</p></div>
  <div class="set"><label>Restore</label>
-  <div class="muted" style="margin-bottom:10px">Replaces everything on the display with the backup, then restarts it.</div>
+  <p class="note">Replaces everything on the display with the backup, then restarts it.</p>
   <input type="file" id="restoreFile" accept=".json,application/json" style="max-width:100%">
-  <div style="margin-top:10px"><button id="restore">Restore</button></div>
+  <div class="act"><button id="restore">Restore</button></div>
   <div class="muted" id="restoreMsg" style="margin-top:8px"></div></div>
 </div>
 <h2>Firmware</h2>
 <div class="card">
  <div class="set"><label>Installed <span id="fw"></span></label>
-  <div class="muted" style="margin-bottom:10px">Pick a Sorento Dash .bin file to update the display over Wi-Fi. Keep this page open until it restarts.</div>
+  <p class="note">Pick a Sorento Dash .bin file to update the display over Wi-Fi. Keep this page open until it restarts.</p>
   <input type="file" id="bin" accept=".bin" style="max-width:100%">
   <div style="margin-top:10px;display:flex;gap:10px;align-items:center"><button class="play" id="upload">Install</button><progress id="prog" max="100" value="0" hidden></progress></div>
   <div class="muted" id="fwMsg" style="margin-top:8px"></div></div>
 </div>
 <h2>Event log</h2>
 <div class="card">
- <div class="set"><div class="muted" style="margin-bottom:10px">Restarts, adapter connections, drives, fill-ups, warnings and setting changes, newest first. "#12 0:05:23" means the 12th start of the display, 5 min 23 s after it started.</div>
+ <div class="set"><p class="note">Restarts, adapter connections, drives, fill-ups, warnings and setting changes, newest first. "#12 0:05:23" means the 12th start of the display, 5 min 23 s after it started.</p>
   <div style="display:flex;gap:10px;flex-wrap:wrap"><button id="logShow">Show log</button><a class="btn" href="/api/log" download="sorento-dash-log.txt">Download</a><button id="logClear">Clear</button></div>
   <pre id="log" hidden></pre></div>
 </div>
+</section>
 <div id="toast"></div>
 <script>
 const COLORS=['#ff8a1f','#22d3ee','#a3e635','#f472b6','#facc15','#a78bfa','#f87171','#2dd4bf'];
@@ -194,6 +239,14 @@ async function post(url,obj){try{await fetch(url,{method:'POST',body:JSON.string
 function saveHorns(){post('/api/horns',{horns:S.horns.map(h=>({key:h.key,name:h.name,hidden:h.hidden,color:h.color}))}).then(ok=>ok&&toast('Saved'))}
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 function f(v,d){return v==null?'-':(+v).toFixed(d)}
+function show(t){document.querySelectorAll('section[data-tab]').forEach(s=>s.hidden=s.dataset.tab!=t);
+ document.querySelectorAll('#tabs button').forEach(b=>{b.classList.toggle('on',b.dataset.tab==t);if(b.dataset.tab==t)b.scrollIntoView({inline:'center',block:'nearest'})});
+ try{localStorage.setItem('tab',t)}catch(e){}window.scrollTo(0,0)}
+$('tabs').onclick=e=>{const b=e.target.closest('button');if(b)show(b.dataset.tab)};
+onhashchange=()=>{const t=location.hash.slice(1);if(document.querySelector('section[data-tab="'+t+'"]'))show(t)};
+{let t=location.hash.slice(1);try{t=t||localStorage.getItem('tab')}catch(e){}show(document.querySelector('section[data-tab="'+t+'"]')?t:'car')}
+// A dot on a tab that has something needing attention.
+function flag(t,on){document.querySelector('#tabs button[data-tab='+t+']').classList.toggle('flag',!!on)}
 function render(){
  let vis=0;
  $('horns').innerHTML=S.horns.map((h,i)=>{const auto=COLORS[vis%COLORS.length];if(!h.hidden)vis++;const c=h.color||auto;
@@ -208,6 +261,7 @@ function render(){
  $('br').value=S.brightness;$('brv').textContent=S.brightness+'%';
  $('dimAfter').value=S.dimAfter;$('dim').value=S.dimPct;$('dimv').textContent=S.dimPct+'%';
  $('tint').value=S.tint;
+ $('pages').innerHTML=(S.pages||[]).map((p,i)=>`<div class="row ${p.hidden?'hidden':''}"><div class="name"><b>${esc(p.name)}</b></div><button data-pg="${i}" class="vis ${p.hidden?'':'on'}">${p.hidden?'Hidden':'Shown'}</button></div>`).join('');
  $('leds').textContent=S.leds?'On':'Off';$('leds').className=S.leds?'on':'';
  if(S.obd){$('disp').value=S.obd.disp;$('tankCap').value=S.obd.tankCap}
  $('fw').textContent=S.fw||'';
@@ -240,7 +294,8 @@ function renderLive(){
  $('codes').innerHTML=!o.codesRead?'Not read yet':(o.codes.length?o.codes.map(c=>`<div class="code"><b>${c.code}</b><span>${esc(c.text||'Look this code up online')}</span></div>`).join(''):'No trouble codes'+(o.mil?' (check engine light on)':''));
  $('transTxt').textContent=o.trans||'not checked';$('readTrans').disabled=!!o.transBusy;
  $('transCodes').innerHTML=(o.transCodes||[]).map(c=>`<div class="code"><b>${c.code}</b><span>${esc(c.text||'Look this code up online')}${c.now?' (active now)':' (stored)'}</span></div>`).join('');
- $('ro').textContent=o.readOnly?'On':'Off';$('ro').className=o.readOnly?'on':'';$('clear').hidden=!!o.readOnly;
+ flag('car',o.mil||o.codes.length||(o.transCodes||[]).length);
+ $('ro').textContent=o.readOnly?'On':'Off';$('ro').className=o.readOnly?'on':'';$('clearRow').hidden=!!o.readOnly;
  $('sim').textContent=o.sim?'On':'Off';$('sim').className=o.sim?'on':'';
 }
 $('horns').addEventListener('change',e=>{const d=e.target.dataset;
@@ -253,6 +308,9 @@ $('horns').addEventListener('click',e=>{const b=e.target.closest('button');if(!b
  else if(d.hide!==undefined){H[d.hide].hidden=!H[d.hide].hidden}
  else return;
  render();saveHorns()});
+$('pages').onclick=e=>{const b=e.target.closest('button');if(!b)return;const P=S.pages,i=+b.dataset.pg;
+ if(!P[i].hidden&&P.filter(p=>!p.hidden).length<2){toast('Keep at least one page');return}
+ P[i].hidden=!P[i].hidden;render();post('/api/settings',{hiddenPages:P.reduce((m,p,j)=>m|(p.hidden?1<<j:0),0)}).then(ok=>ok&&toast('Saved'))};
 $('vol').oninput=e=>$('volv').textContent=e.target.value+'%';
 $('vol').onchange=e=>{S.volume=+e.target.value;post('/api/settings',{volume:S.volume})};
 $('br').oninput=e=>{$('brv').textContent=e.target.value+'%';post('/api/settings',{brightness:+e.target.value})};
@@ -285,6 +343,7 @@ function renderSvc(){
  $('sc').value=m.speedCal;
  $('scHelp').textContent='Learned when you correct the odometer: the display compares the real miles since the last correction with the miles it counted ('+
   (m.sinceSet==null?'starts from your next odometer entry':Math.round(m.sinceSet)+' counted so far, 200+ needed')+'). Corrects speed, trip, range, MPG and the odometer.';
+ flag('service',m.items.some(it=>it.remaining!=null&&it.remaining<=300));
  $('svc').innerHTML=m.items.map((it,i)=>{let st='<span class="due">Not logged yet</span>';
   if(it.remaining!=null){const r=Math.round(it.remaining);
    st=r<0?`<span class="due over">Overdue by ${(-r).toLocaleString()} mi</span>`:`<span class="due ${r<=300?'soon':'ok'}">Due in ${r.toLocaleString()} mi</span>`}
@@ -327,6 +386,7 @@ $('logClear').onclick=e=>sure(e.target,()=>post('/api/log/clear',{}).then(()=>{t
 function loadHealth(){fetch('/api/health').then(r=>r.json()).then(h=>{
  $('healthIntro').textContent='Early warnings for worn or failing parts, from '+h.drives+' drive'+(h.drives==1?'':'s')+' so far'+
   (h.learnLeft>0?' (learning this car\'s normal: '+h.learnLeft+' more to go)':'')+'. Tap a check for details. These point at likely suspects, not a diagnosis.';
+ flag('health',h.checks.some(c=>c.status=='check'||c.status=='watch'));
  const L={check:'Check',watch:'Watch',ok:'OK',learning:'Learning',nodata:'Needs data'},R={check:4,watch:3,ok:2,learning:1,nodata:0};
  $('health').innerHTML=h.checks.sort((a,b)=>R[b.status]-R[a.status]).map(c=>`<details class="set hc"><summary><b>${esc(c.name)}</b><span style="display:flex;gap:8px;align-items:center"><span class="muted">${esc(c.summary)}</span><span class="chip ${c.status}">${L[c.status]}</span></span></summary><p class="muted">${esc(c.detail)}</p></details>`).join('')}).catch(()=>{})}
 loadHealth();setInterval(loadHealth,30000);

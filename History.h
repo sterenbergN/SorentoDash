@@ -49,6 +49,18 @@ public:
   void begin() {
     mtx = xSemaphoreCreateMutex();
     load();
+    loaded = true;
+  }
+  bool isLoaded() const { return loaded; }
+
+  // The most recent recorded drive. Right after power-up that is the drive
+  // before this one (a new record only starts once the car has moved).
+  bool lastDrive(DriveRec &out) {
+    lock();
+    bool have = loaded && !demo && !drives.empty();
+    if (have) out = drives.back();
+    unlock();
+    return have;
   }
 
   // Demo car: use separate scratch files (wiped each time demo starts) so demo
@@ -291,6 +303,7 @@ public:
 private:
   SemaphoreHandle_t mtx = nullptr;
   bool demo = false, driving = false;
+  volatile bool loaded = false;
   std::vector<DriveRec> drives;
   std::vector<FillRec> fills;
   DriveRec cur{};

@@ -43,7 +43,7 @@ RfCapture rf;
 History hist;
 Health health;
 
-#define FW_VERSION "1.22"
+#define FW_VERSION "1.23"
 
 // ---------------------------------------------------------------- tuning
 constexpr uint32_t LONG_PRESS_MS = 600;
@@ -262,6 +262,9 @@ int otaPct = 0;
 bool otaOk = false;
 
 // Short confirmation pill drawn over any screen.
+// Start-up summary of the previous drive, shown while the adapter connects.
+DriveRec lastDriveRec{};
+uint32_t lastDriveUntil = 0;  // 0 = not showing
 const char *bigAlert = nullptr;    // warning currently shown full-screen
 const char *ackedAlert = nullptr;  // warning the driver has dismissed (badge only from then on)
 String toastText, pendingToast;  // pendingToast: a number editor's save can say more than "Saved"
@@ -507,6 +510,12 @@ String webStateJson() {
   doc["tint"] = cfg.tint;
   doc["dimAfter"] = cfg.dimAfterSec;
   doc["dimPct"] = cfg.dimPct;
+  JsonArray pages = doc["pages"].to<JsonArray>();
+  for (int i = 0; i < CP_COUNT; i++) {
+    JsonObject p = pages.add<JsonObject>();
+    p["name"] = PAGE_NAMES[i];
+    p["hidden"] = (bool)(cfg.hiddenPages & (1 << i));
+  }
   JsonArray arr = doc["horns"].to<JsonArray>();
   for (auto &m : cfg.horns) {
     if (std::find(files.begin(), files.end(), m.key) == files.end()) continue;
@@ -628,6 +637,14 @@ void webSaveSettings(const String &body) {
   if (doc["tint"].is<int>()) {
     cfg.tint = constrain(doc["tint"].as<int>(), 0, 2);
     cfg.saveTint();
+  }
+  if (doc["hiddenPages"].is<int>()) {
+    int all = (1 << CP_COUNT) - 1, m = doc["hiddenPages"].as<int>() & all;
+    if (m != all) {  // never hide every page
+      cfg.hiddenPages = m;
+      cfg.saveHiddenPages();
+      if (menu.open() && mode == MODE_MENU) menu.refresh();
+    }
   }
   if (doc["dimAfter"].is<int>() || doc["dimPct"].is<int>()) {
     if (doc["dimAfter"].is<int>()) cfg.dimAfterSec = max(0, doc["dimAfter"].as<int>());
@@ -1029,9 +1046,13 @@ static void drawPageDots() {
   for (int i = 0; i < CP_COUNT; i++)
     if (pageShown(i) || i == carPage) shown[n++] = i;
   if (n < 2) return;
-  int x0 = CX - (n - 1) * GAP / 2;
-  for (int i = 0; i < n; i++)
-    canvas.fillSmoothCircle(x0 + i * GAP, 222, shown[i] == carPage ? 3 : 2, rgb(shown[i] == carPage ? C_TEXT : C_TICK));
+  // Along the curve of the screen's bottom edge, so the end dots don't run into the ring.
+  constexpr float R = 102;
+  for (int i = 0; i < n; i++) {
+    float a = (i - (n - 1) / 2.0f) * GAP / R;
+    canvas.fillSmoothCircle(CX + lroundf(R * sinf(a)), CY + lroundf(R * cosf(a)), shown[i] == carPage ? 3 : 2,
+                            rgb(shown[i] == carPage ? C_TEXT : C_TICK));
+  }
 }
 
 // Two stats side by side near the bottom of a gauge page.
@@ -1602,6 +1623,19 @@ static void drawCarScreen() {
   drawPageDots();
 }
 
+// How the previous drive went (shown for a few seconds at start-up).
+static void drawLastDrive() {
+  const DriveRec &d = lastDriveRec;
+  float mpg = d.gallons > 0.01f ? d.miles / d.gallons : NAN;
+  drawGaugeArc(isnan(mpg) ? 0 : mpg / 40.0f, isnan(mpg) ? C_DIM : mpgColor(mpg));
+  text("LAST DRIVE", CX, 56, &fSmall, C_DIM);
+  text(fmt(mpg, 1), CX, 94, &fHuge, C_TEXT);
+  text("MPG", CX, 128, &fSmall, C_DIM);
+  uint32_t min = (d.seconds + 30) / 60;
+  String time = min >= 60 ? String(min / 60) + ":" + (min % 60 < 10 ? "0" : "") + String(min % 60) : String(min);
+  drawStatPair(String(d.miles, d.miles < 100 ? 1 : 0), "MILES", time, min >= 60 ? "HOURS" : "MIN", 154);
+}
+
 // A warning over the whole screen: what's wrong, the reading, what to do.
 static void drawBigAlert(uint32_t now) {
   canvas.fillScreen(TFT_BLACK);
@@ -1622,7 +1656,10 @@ static void render(uint32_t now) {
   if (mode != MODE_HORNS) canvas.fillScreen(TFT_BLACK);
   switch (mode) {
     case MODE_HORNS: drawHornScreen(now); break;
-    case MODE_CAR: drawCarScreen(); break;
+    case MODE_CAR:
+      if (lastDriveUntil) drawLastDrive();
+      else drawCarScreen();
+      break;
     case MODE_MENU: drawMenuScreen(); break;
     case MODE_VOLUME: drawGauge("VOLUME", cfg.volumePct, C_VOLUME); break;
     case MODE_BRIGHTNESS: drawGauge("BRIGHTNESS", cfg.brightnessPct, C_BRIGHT); break;
@@ -2096,13 +2133,13 @@ static std::vector<MenuItem> rootMenu() {
                        [] {
                          return String("Restarts, adapter connections, drives, fill-ups, warnings and setting changes are "
                                        "logged to help track down problems.\n\nRead it on the phone page: Phone & Wi-Fi > "
-                                       "Phone setup, then Event log at the bottom.");
+                                       "Phone setup, then the System tab.");
                        }),
         MenuItem::info("Backup", [] { return String("on the phone page"); },
                        [] {
                          return String("Save every setting, calibration, service record and the drive history to your "
                                        "phone, and restore it later.\n\nOpen Phone & Wi-Fi > Phone setup, then Backup "
-                                       "near the bottom.");
+                                       "on the System tab.");
                        }),
         MenuItem::act("Clear drive history", [] { hist.clear(); showToast("History cleared"); }, nullptr,
                       "Delete drive history?"),
@@ -2617,6 +2654,16 @@ void loop() {
     default: break;
   }
   bool shot = handleConsole(det, btn, swipe);
+  // Once the history has loaded (a moment after power-up), show how the
+  // previous drive went. The display never sees a drive end - its power goes
+  // with the ignition - so this is the first chance to.
+  static bool lastDriveChecked = false;
+  if (!lastDriveChecked && hist.isLoaded()) {
+    lastDriveChecked = true;
+    if (now < 4000 && hist.lastDrive(lastDriveRec) && lastDriveRec.miles >= 0.5f) lastDriveUntil = now + 7000;
+  }
+  if (lastDriveUntil && (now > lastDriveUntil || det || btn || swipe)) lastDriveUntil = 0;
+
   if (det || btn || swipe) {
     lastInput = now;
     if (dimmed) { dimmed = false; setBacklight(backlightLevel()); }

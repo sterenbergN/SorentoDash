@@ -39,8 +39,10 @@ STATE = {"obd": {"state": "Connected", "adapter": "IOS-Vlink", "sim": False, "re
                  "trans": "2 codes", "transBusy": False, "transCodes": [
                      {"code": "P0715", "now": True, "text": "Input/turbine speed sensor"},
                      {"code": "P0741", "now": False, "text": "Lock-up clutch stuck off"}]},
-         "connected": True, "volume": 80, "brightness": 90, "leds": True, "tint": 1, "fw": "mock",
-         "maint": {"odometer": 181266, "items": [{"name": n, "interval": i, "last": None, "remaining": None} for n, i in
+         "connected": True, "volume": 80, "brightness": 90, "leds": True, "tint": 1, "fw": "mock", "dimAfter": 60, "dimPct": 20,
+         "pages": [{"name": n, "hidden": h} for n, h in [("Economy", False), ("Trip & range", False), ("Engine", False),
+                   ("Trouble codes", False), ("Engine health", True), ("Service", True), ("History", False)]],
+         "maint": {"odometer": 181266, "speedCal": 0.0, "sinceSet": 120, "items": [{"name": n, "interval": i, "last": None, "remaining": None} for n, i in
                    [("Oil change", 5000), ("Tire rotation", 7500), ("Engine air filter", 15000), ("Cabin air filter", 15000)]]},
          "horns": [
     {"key": f"T{n:02d}     WAV", "file": f"T{n:02d}.WAV", "auto": f"Horn {i + 1}", "name": "", "hidden": False}
@@ -53,6 +55,12 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/api/state": self._send(200, json.dumps(STATE).encode(), "application/json")
         elif self.path == "/api/history": self._send(200, json.dumps(fake_history()).encode(), "application/json")
         elif self.path == "/stats": self._send(200, STATS, "text/html")
+        elif self.path == "/api/health": self._send(200, json.dumps({"drives": 9, "learnLeft": 0, "checks": [
+            {"name": "Air leaks", "status": "watch", "summary": "lean at idle +14%", "detail": "Fuel trim is high at idle and normal on the highway: a vacuum leak is the usual cause."},
+            {"name": "Battery & charging", "status": "ok", "summary": "14.1 V charging", "detail": "Resting and charging voltage look normal."},
+            {"name": "Thermostat", "status": "ok", "summary": "warms up normally", "detail": "Reaches operating temperature in the expected time."},
+            {"name": "Knock / timing", "status": "learning", "summary": "needs more drives", "detail": "Still learning this car's normal."}]}).encode(), "application/json")
+        elif self.path == "/api/log": self._send(200, b"Sorento Dash mock, restart #12, up 3 min\n#12 0:00:00  Started vMock: power on\n#12 0:00:07  Adapter connected: IOS-Vlink\n#12 0:00:13  Car on: engine computer answering\n")
         else: self._send(200, PAGE, "text/html")
     def do_POST(self):
         n = int(self.headers.get("Content-Length") or 0)

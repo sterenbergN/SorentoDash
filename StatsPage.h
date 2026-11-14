@@ -45,7 +45,7 @@ td:first-child,th:first-child{text-align:left}
 button.arm{background:#7f1d1d!important;color:#fff!important}
 [hidden]{display:none!important}
 </style></head><body>
-<a href="/">&larr; Setup</a>
+<a href="/">&larr; Sorento Dash</a>
 <h1>Driving stats</h1>
 <div class="sub" id="sub">Loading...</div>
 <div class="tiles" id="tiles"></div>
