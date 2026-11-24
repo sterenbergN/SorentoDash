@@ -43,7 +43,7 @@ RfCapture rf;
 History hist;
 Health health;
 
-#define FW_VERSION "1.23"
+#define FW_VERSION "1.24"
 
 // ---------------------------------------------------------------- tuning
 constexpr uint32_t LONG_PRESS_MS = 600;
@@ -173,27 +173,51 @@ static uint32_t parseColor(const String &s, uint32_t fallback) {
 }
 
 // ---------------------------------------------------------------- encoder
+// Quarter steps add up while the knob moves, and a click counts only when the
+// knob arrives back at its resting state (A and B both high or both low), in
+// whichever direction the steps went. So every click starts from zero: an
+// edge missed or bounced (e.g. while settings or history are being written to
+// flash) can't leave a leftover count that later turns into a skipped or
+// extra page when the turning direction changes.
 volatile int32_t encDetents = 0;
 volatile int8_t encQuad = 0;
 volatile uint8_t encLast = 0;
+volatile uint8_t encRest = 3;  // A/B state at a click; read at start-up, re-learned while the knob sits still
 portMUX_TYPE encMux = portMUX_INITIALIZER_UNLOCKED;
 DRAM_ATTR static const int8_t ENC_TABLE[16] = {0, -1, 1, 0, 1, 0, 0, -1, -1, 0, 0, 1, 0, 1, -1, 0};
 
+static uint8_t IRAM_ATTR readEncoderPins() {
+  return ((uint8_t)digitalRead(PIN_ENC_A) << 1) | (uint8_t)digitalRead(PIN_ENC_B);
+}
+
 void IRAM_ATTR encoderISR() {
-  uint8_t s = ((uint8_t)digitalRead(PIN_ENC_A) << 1) | (uint8_t)digitalRead(PIN_ENC_B);
-  int8_t m = ENC_TABLE[(encLast << 2) | s];
+  uint8_t s = readEncoderPins();
   portENTER_CRITICAL_ISR(&encMux);
+  int8_t q = encQuad + ENC_TABLE[(encLast << 2) | s];
   encLast = s;
-  if (m) {
-    encQuad += m;
-    if (encQuad >= 4) { encDetents = encDetents + 1; encQuad -= 4; }
-    else if (encQuad <= -4) { encDetents = encDetents - 1; encQuad += 4; }
+  if (s == encRest) {
+    // Two quarter steps settle the direction even if an edge was lost.
+    if (q >= 2) encDetents = encDetents + 1;
+    else if (q <= -2) encDetents = encDetents - 1;
+    q = 0;
   }
+  encQuad = constrain(q, -8, 8);
   portEXIT_CRITICAL_ISR(&encMux);
 }
 
-static int32_t takeDetents() {
+static int32_t takeDetents(uint32_t now) {
+  // A knob left alone always sits at a click, so a both-high or both-low
+  // state held for a while is the resting state (corrects a start-up reading
+  // taken mid-turn).
+  static uint8_t still = 0xFF;
+  static uint32_t stillSince = 0;
+  uint8_t s = readEncoderPins();
+  if (s != still) { still = s; stillSince = now; }
   portENTER_CRITICAL(&encMux);
+  if ((s == 0 || s == 3) && s != encRest && encLast == s && now - stillSince > 2000) {
+    encRest = s;
+    encQuad = 0;
+  }
   int32_t d = encDetents;
   encDetents = 0;
   portEXIT_CRITICAL(&encMux);
@@ -2567,7 +2591,8 @@ void setup() {
   pinMode(PIN_ENC_A, INPUT);
   pinMode(PIN_ENC_B, INPUT);
   pinMode(PIN_ENC_SW, INPUT_PULLUP);
-  encLast = ((uint8_t)digitalRead(PIN_ENC_A) << 1) | (uint8_t)digitalRead(PIN_ENC_B);
+  encLast = readEncoderPins();
+  if (encLast == 0 || encLast == 3) encRest = encLast;  // the knob sits at a click at power-up
   attachInterrupt(digitalPinToInterrupt(PIN_ENC_A), encoderISR, CHANGE);
   attachInterrupt(digitalPinToInterrupt(PIN_ENC_B), encoderISR, CHANGE);
   touch.begin(PIN_TP_SDA, PIN_TP_SCL, PIN_TP_RST);
@@ -2621,7 +2646,7 @@ void loop() {
 
   if (demoPlaying && now - demoStart > DEMO_LEN_MS) demoPlaying = false;
 
-  int32_t det = takeDetents();
+  int32_t det = takeDetents(now);
   Press btn = button.poll(now);
   // Holding inside settings keeps backing out (to exit quickly); a hold that
   // opened settings from another screen doesn't continue into it.
