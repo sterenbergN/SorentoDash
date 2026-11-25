@@ -40,6 +40,7 @@ STATE = {"obd": {"state": "Connected", "adapter": "IOS-Vlink", "sim": False, "re
                      {"code": "P0715", "now": True, "text": "Input/turbine speed sensor"},
                      {"code": "P0741", "now": False, "text": "Lock-up clutch stuck off"}]},
          "connected": True, "volume": 80, "brightness": 90, "leds": True, "tint": 1, "fw": "mock", "dimAfter": 60, "dimPct": 20,
+         "knob": {"mode": 0, "learnedHalf": True, "stops": 3, "bothStops": True},
          "pages": [{"name": n, "hidden": h} for n, h in [("Economy", False), ("Trip & range", False), ("Engine", False),
                    ("Trouble codes", False), ("Engine health", True), ("Service", True), ("History", False)]],
          "maint": {"odometer": 181266, "speedCal": 0.0, "sinceSet": 120, "items": [{"name": n, "interval": i, "last": None, "remaining": None} for n, i in
@@ -73,6 +74,7 @@ class H(BaseHTTPRequestHandler):
             STATE["maint"]["items"] = [{**it, "remaining": None} for it in body["items"]]
         elif self.path == "/api/settings":
             STATE.update({k: v for k, v in body.items() if k in STATE})
+            if "knobMode" in body: STATE["knob"]["mode"] = body["knobMode"]
         self._send(200, b"ok")
 
 from http.server import ThreadingHTTPServer

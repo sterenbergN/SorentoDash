@@ -43,7 +43,7 @@ RfCapture rf;
 History hist;
 Health health;
 
-#define FW_VERSION "1.25"
+#define FW_VERSION "1.26"
 
 // ---------------------------------------------------------------- tuning
 constexpr uint32_t LONG_PRESS_MS = 600;
@@ -214,6 +214,15 @@ void IRAM_ATTR encoderISR() {
   portEXIT_CRITICAL_ISR(&encMux);
 }
 
+// Switch how clicks are counted. rest: the A/B state the knob sits at now.
+static void setEncHalf(bool half, uint8_t rest) {
+  portENTER_CRITICAL(&encMux);
+  encHalf = half;
+  if (rest == 0 || rest == 3) encRest = rest;
+  encQuad = 0;
+  portEXIT_CRITICAL(&encMux);
+}
+
 static int32_t takeDetents(uint32_t now) {
   // A knob left alone always sits at a click, so a both-high or both-low
   // state held for a while is a resting state.
@@ -230,17 +239,13 @@ static int32_t takeDetents(uint32_t now) {
     stopCounted = true;
     uint8_t &n = encStops[s == 3];
     if (n < 255) n++;
-    bool half = encHalf;
+    bool half = cfg.encHalfStep;
     if (encStops[0] >= 2 && encStops[1] >= 2) half = true;
     else if (encStops[0] + encStops[1] >= 10 && (encStops[0] == 0 || encStops[1] == 0)) half = false;
-    if (half != encHalf) {
-      portENTER_CRITICAL(&encMux);
-      encHalf = half;
-      encRest = s;
-      encQuad = 0;
-      portEXIT_CRITICAL(&encMux);
+    if (half != cfg.encHalfStep) {
       cfg.saveEncHalfStep(half);
-      events.add(half ? "Knob: clicks every half step" : "Knob: clicks every full step");
+      events.add(half ? "Knob: detected a click every half step" : "Knob: detected a click every full step");
+      if (cfg.encMode == 0) setEncHalf(half, s);  // set by hand on the phone page: only remembered
     }
   }
   portENTER_CRITICAL(&encMux);
@@ -566,6 +571,11 @@ String webStateJson() {
   doc["tint"] = cfg.tint;
   doc["dimAfter"] = cfg.dimAfterSec;
   doc["dimPct"] = cfg.dimPct;
+  JsonObject knob = doc["knob"].to<JsonObject>();
+  knob["mode"] = cfg.encMode;
+  knob["learnedHalf"] = cfg.encHalfStep;
+  knob["stops"] = encStops[0] + encStops[1];
+  knob["bothStops"] = encStops[0] && encStops[1];
   JsonArray pages = doc["pages"].to<JsonArray>();
   for (int i = 0; i < CP_COUNT; i++) {
     JsonObject p = pages.add<JsonObject>();
@@ -693,6 +703,15 @@ void webSaveSettings(const String &body) {
   if (doc["tint"].is<int>()) {
     cfg.tint = constrain(doc["tint"].as<int>(), 0, 2);
     cfg.saveTint();
+  }
+  if (doc["knobMode"].is<int>()) {
+    int m = constrain(doc["knobMode"].as<int>(), 0, 2);
+    if (m != cfg.encMode) {
+      cfg.saveEncMode(m);
+      bool half = m ? m == 1 : cfg.encHalfStep;
+      setEncHalf(half, readEncoderPins());
+      events.add(m ? "Knob set by hand: a click every %s step" : "Knob set to auto (%s step)", half ? "half" : "full");
+    }
   }
   if (doc["hiddenPages"].is<int>()) {
     int all = (1 << CP_COUNT) - 1, m = doc["hiddenPages"].as<int>() & all;
@@ -2508,8 +2527,9 @@ static bool handleConsole(int32_t &det, Press &btn, int &swipe) {
   else if (s == "shot") return true;
   else if (s == "ver") Serial.println(FW_VERSION " " __DATE__ " " __TIME__);
   else if (s == "enc")
-    Serial.printf("knob: %s step, A/B now %u%u, stops at 00:%u 11:%u%s", encHalf ? "half" : "full", readEncoderPins() >> 1,
-                  readEncoderPins() & 1, encStops[0], encStops[1], "\n");
+    Serial.printf("knob: %s step (%s), A/B now %u%u, stops at 00:%u 11:%u%s", encHalf ? "half" : "full",
+                  cfg.encMode ? "set by hand" : "auto", readEncoderPins() >> 1, readEncoderPins() & 1, encStops[0],
+                  encStops[1], "\n");
   else if (s == "events" || s == "health") {
     Serial.setTxTimeoutMs(1000);  // long replies: wait for the PC instead of dropping the rest
     Serial.println(s == "events" ? webLogText() : webHealthJson());
@@ -2629,7 +2649,7 @@ void setup() {
   pinMode(PIN_ENC_A, INPUT_PULLUP);
   pinMode(PIN_ENC_B, INPUT_PULLUP);
   pinMode(PIN_ENC_SW, INPUT_PULLUP);
-  encHalf = cfg.encHalfStep;
+  encHalf = cfg.encMode ? cfg.encMode == 1 : cfg.encHalfStep;
   encLast = readEncoderPins();
   if (encLast == 0 || encLast == 3) encRest = encLast;  // the knob sits at a click at power-up
   attachInterrupt(digitalPinToInterrupt(PIN_ENC_A), encoderISR, CHANGE);

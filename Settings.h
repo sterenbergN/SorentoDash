@@ -24,6 +24,7 @@ public:
   int homePage = 0;      // car page shown at start-up: the one that was up last
   int hiddenPages = 0;   // bit per car page left out of the home carousel
   bool encHalfStep = true;  // knob clicks every half A/B cycle (learned from where it rests; see SorentoDash.ino)
+  int encMode = 0;          // 0 = learn the knob's kind, 1 = half step, 2 = full step (set on the phone page)
   String selectedKey;
   std::vector<HornMeta> horns;  // user order
   std::vector<String> cachedFiles;
@@ -39,6 +40,7 @@ public:
     homePage = p.getInt("page", homePage);
     hiddenPages = p.getInt("pages", hiddenPages);
     encHalfStep = p.getBool("encHalf", encHalfStep);
+    encMode = p.getInt("encMode", encMode);
     selectedKey = p.getString("sel", "");
     parseHorns(p.getString("horns", ""));
     cachedFiles = split(p.getString("files", ""), '\n');
@@ -62,6 +64,11 @@ public:
     if (half == encHalfStep) return;
     encHalfStep = half;
     p.putBool("encHalf", half);
+  }
+  void saveEncMode(int m) {
+    if (m == encMode) return;
+    encMode = m;
+    p.putInt("encMode", m);
   }
   void saveSelected(const String &key) {
     if (key == selectedKey) return;

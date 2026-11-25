@@ -159,6 +159,7 @@ progress{width:100%;height:10px;accent-color:var(--accent)}
  <div class="set"><label>Dimmed brightness <span id="dimv"></span></label><input type="range" id="dim" min="10" max="100" step="5"></div>
  <div class="set toggle"><b>Horn screen background</b><select id="tint"><option value="0">Black</option><option value="1">Subtle color</option><option value="2">Bold color</option></select></div>
  <div class="set toggle"><b>LED ring</b><button id="leds"></button></div>
+ <div class="set toggle"><div><b>Knob clicks</b><div class="muted" id="knobTxt"></div></div><select id="knob"><option value="0">Auto</option><option value="1">Every half step</option><option value="2">Every full step</option></select></div>
 </div>
 <h2>Home pages</h2>
 <p class="sub">The car pages the knob and swipes step through. Trouble codes and Engine health come back by themselves while they have something to report.</p>
@@ -263,6 +264,9 @@ function render(){
  $('tint').value=S.tint;
  $('pages').innerHTML=(S.pages||[]).map((p,i)=>`<div class="row ${p.hidden?'hidden':''}"><div class="name"><b>${esc(p.name)}</b></div><button data-pg="${i}" class="vis ${p.hidden?'':'on'}">${p.hidden?'Hidden':'Shown'}</button></div>`).join('');
  $('leds').textContent=S.leds?'On':'Off';$('leds').className=S.leds?'on':'';
+ const k=S.knob;if(k){$('knob').value=k.mode;const det='a click every '+(k.learnedHalf?'half':'full')+' step';
+  $('knobTxt').textContent=(k.mode==0?(k.bothStops||!k.learnedHalf?'Detected: '+det+'. ':'Assumed: '+det+' (confirmed once the knob has stopped at a few clicks). '):'Set by hand. Auto detects '+det+'. ')+
+   'If one click moves two pages, pick Every full step; if only every other click does anything, pick Every half step.'}
  if(S.obd){$('disp').value=S.obd.disp;$('tankCap').value=S.obd.tankCap}
  $('fw').textContent=S.fw||'';
  renderSvc();
@@ -321,6 +325,7 @@ $('dim').onchange=e=>{S.dimPct=+e.target.value;post('/api/settings',{dimPct:S.di
 $('setLevel').onclick=e=>sure(e.target,()=>post('/api/obd',{fuelLevel:+$('level').value}).then(()=>toast('Tank level set')),'Tap again to set');
 $('tint').onchange=e=>{S.tint=+e.target.value;post('/api/settings',{tint:S.tint})};
 $('leds').onclick=()=>{S.leds=!S.leds;render();post('/api/settings',{leds:S.leds})};
+$('knob').onchange=e=>{S.knob.mode=+e.target.value;render();post('/api/settings',{knobMode:S.knob.mode}).then(ok=>ok&&toast('Saved'))};
 $('resetTrip').onclick=e=>sure(e.target,()=>post('/api/obd',{resetTrip:true}).then(()=>toast('Trip reset')));
 $('fill').onclick=()=>{const g=parseFloat($('pumped').value);if(!(g>0)){toast('Enter the gallons pumped');return}
  post('/api/obd',{fillUp:g}).then(()=>{$('pumped').value='';toast('Tank reset & calibrated')})};
