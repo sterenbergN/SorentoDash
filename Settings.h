@@ -23,6 +23,7 @@ public:
   int dimPct = 20;       // brightness when dimmed (never brighter than the normal setting)
   int homePage = 0;      // car page shown at start-up: the one that was up last
   int hiddenPages = 0;   // bit per car page left out of the home carousel
+  bool encHalfStep = true;  // knob clicks every half A/B cycle (learned from where it rests; see SorentoDash.ino)
   String selectedKey;
   std::vector<HornMeta> horns;  // user order
   std::vector<String> cachedFiles;
@@ -37,6 +38,7 @@ public:
     dimPct = p.getInt("dimPct", dimPct);
     homePage = p.getInt("page", homePage);
     hiddenPages = p.getInt("pages", hiddenPages);
+    encHalfStep = p.getBool("encHalf", encHalfStep);
     selectedKey = p.getString("sel", "");
     parseHorns(p.getString("horns", ""));
     cachedFiles = split(p.getString("files", ""), '\n');
@@ -56,6 +58,11 @@ public:
     p.putInt("page", page);
   }
   void saveHiddenPages() { p.putInt("pages", hiddenPages); }
+  void saveEncHalfStep(bool half) {
+    if (half == encHalfStep) return;
+    encHalfStep = half;
+    p.putBool("encHalf", half);
+  }
   void saveSelected(const String &key) {
     if (key == selectedKey) return;
     selectedKey = key;

@@ -45,17 +45,17 @@ static void edge(int pin) {
   if (it != isrs.end()) it->second.first(it->second.second);
 }
 
-// One knob detent = four quadrature edges, fed through the firmware's own ISR.
+// One knob detent = two quadrature edges (half a cycle, like the CrowPanel's
+// encoder: it rests at A/B both low and both high), fed through the
+// firmware's own ISR.
 void turnKnob(int detents) {
-  static const int cw[4][2] = {{1, 0}, {1, 1}, {0, 1}, {0, 0}};   // A,B after each edge
-  static const int ccw[4][2] = {{0, 1}, {1, 1}, {1, 0}, {0, 0}};
-  const int(*seq)[2] = detents > 0 ? cw : ccw;
   for (int d = 0; d < std::abs(detents); d++) {
-    for (int i = 0; i < 4; i++) {
-      int changed = seq[i][0] != state.encA ? PIN_A : PIN_B;
-      state.encA = seq[i][0];
-      state.encB = seq[i][1];
-      edge(changed);
+    for (int i = 0; i < 2; i++) {
+      // Clockwise A leads: A changes when A==B, B when they differ.
+      bool moveA = (state.encA == state.encB) == (detents > 0);
+      if (moveA) state.encA = !state.encA;
+      else state.encB = !state.encB;
+      edge(moveA ? PIN_A : PIN_B);
     }
   }
 }

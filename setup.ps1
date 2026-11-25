@@ -134,17 +134,19 @@ if ($setupFirmware) {
 
   # Configure ESP32 package index
   $espUrl = "https://espressif.github.io/arduino-esp32/package_esp32_index.json"
-  & $cli config init --additional-urls $espUrl -ErrorAction SilentlyContinue 2>$null | Out-Null
-  & $cli config set board_manager.additional_urls "[$espUrl]" 2>$null | Out-Null
+  try { & $cli config init --additional-urls $espUrl 2>$null | Out-Null } catch {}  # already set up: keep it
+  & $cli config set board_manager.additional_urls $espUrl 2>$null | Out-Null
 
   Write-Host "Updating index..."
   & $cli core update-index --additional-urls $espUrl | Out-Null
 
-  # Check / install ESP32 platform
+  # Check / install ESP32 platform. Pinned: core 4.x doesn't build with
+  # LovyanGFX yet (soc/gdma_channel.h is gone).
+  $espCore = "3.3.13"
   $cores = & $cli core list
-  if ($cores -notmatch 'esp32:esp32' -or $Force) {
-    Write-Host "Installing ESP32 core (esp32:esp32) for CrowPanel ESP32-S3..."
-    & $cli core install esp32:esp32 --additional-urls $espUrl
+  if (($cores | Select-String "esp32:esp32\s+$([regex]::Escape($espCore))") -eq $null -or $Force) {
+    Write-Host "Installing ESP32 core (esp32:esp32@$espCore) for CrowPanel ESP32-S3..."
+    & $cli core install "esp32:esp32@$espCore" --additional-urls $espUrl
   } else {
     Write-Host "  [OK] ESP32 core is installed" -ForegroundColor Green
   }
