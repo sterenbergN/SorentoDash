@@ -23,8 +23,12 @@ public:
   int dimPct = 20;       // brightness when dimmed (never brighter than the normal setting)
   int homePage = 0;      // car page shown at start-up: the one that was up last
   int hiddenPages = 0;   // bit per car page left out of the home carousel
-  bool encHalfStep = true;  // knob clicks every half A/B cycle (learned from where it rests; see SorentoDash.ino)
-  int encMode = 0;          // 0 = learn the knob's kind, 1 = half step, 2 = full step (set on the phone page)
+  // Knob (see the encoder section of SorentoDash.ino). Kinds: 1 = a click every
+  // half A/B cycle, 2 = every full cycle, 3 = every quarter (every edge).
+  int encKind = 1;          // learned from where the knob comes to rest
+  int encMode = 0;          // set on the phone page: 0 = use the learned kind, else that kind
+  bool encReverse = false;  // turning direction swapped
+  bool encFilter = false;   // sample the pins instead of reacting to every edge (noise filter)
   String selectedKey;
   std::vector<HornMeta> horns;  // user order
   std::vector<String> cachedFiles;
@@ -39,8 +43,10 @@ public:
     dimPct = p.getInt("dimPct", dimPct);
     homePage = p.getInt("page", homePage);
     hiddenPages = p.getInt("pages", hiddenPages);
-    encHalfStep = p.getBool("encHalf", encHalfStep);
+    encKind = p.getInt("encKind", p.getBool("encHalf", true) ? 1 : 2);  // "encHalf": v1.25-1.26
     encMode = p.getInt("encMode", encMode);
+    encReverse = p.getBool("encRev", encReverse);
+    encFilter = p.getBool("encFilt", encFilter);
     selectedKey = p.getString("sel", "");
     parseHorns(p.getString("horns", ""));
     cachedFiles = split(p.getString("files", ""), '\n');
@@ -60,15 +66,25 @@ public:
     p.putInt("page", page);
   }
   void saveHiddenPages() { p.putInt("pages", hiddenPages); }
-  void saveEncHalfStep(bool half) {
-    if (half == encHalfStep) return;
-    encHalfStep = half;
-    p.putBool("encHalf", half);
+  void saveEncKind(int k) {
+    if (k == encKind) return;
+    encKind = k;
+    p.putInt("encKind", k);
   }
   void saveEncMode(int m) {
     if (m == encMode) return;
     encMode = m;
     p.putInt("encMode", m);
+  }
+  void saveEncReverse(bool r) {
+    if (r == encReverse) return;
+    encReverse = r;
+    p.putBool("encRev", r);
+  }
+  void saveEncFilter(bool f) {
+    if (f == encFilter) return;
+    encFilter = f;
+    p.putBool("encFilt", f);
   }
   void saveSelected(const String &key) {
     if (key == selectedKey) return;

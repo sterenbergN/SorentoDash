@@ -159,7 +159,14 @@ progress{width:100%;height:10px;accent-color:var(--accent)}
  <div class="set"><label>Dimmed brightness <span id="dimv"></span></label><input type="range" id="dim" min="10" max="100" step="5"></div>
  <div class="set toggle"><b>Horn screen background</b><select id="tint"><option value="0">Black</option><option value="1">Subtle color</option><option value="2">Bold color</option></select></div>
  <div class="set toggle"><b>LED ring</b><button id="leds"></button></div>
- <div class="set toggle"><div><b>Knob clicks</b><div class="muted" id="knobTxt"></div></div><select id="knob"><option value="0">Auto</option><option value="1">Every half step</option><option value="2">Every full step</option></select></div>
+</div>
+<h2>Knob</h2>
+<p class="sub">If the knob still misbehaves, try in turn: one click moves two pages &rarr; pick the next type down the list (half &rarr; full); every other click does nothing &rarr; the next type up (full &rarr; half &rarr; quarter); pages go the wrong way &rarr; Reverse; pages jump by themselves or when turning fast &rarr; Noise filter. Changes take effect right away.</p>
+<div class="card">
+ <div class="set toggle"><div><b>Knob clicks</b><div class="muted" id="knobTxt"></div></div><select id="knob"><option value="0">Auto</option><option value="3">Every quarter step</option><option value="1">Every half step</option><option value="2">Every full step</option></select></div>
+ <div class="set toggle"><div><b>Turning direction</b><div class="muted">Swap if clockwise goes to the previous page.</div></div><button id="knobRev"></button></div>
+ <div class="set toggle"><div><b>Noise filter</b><div class="muted">Reads the knob 1000 times a second and ignores blips shorter than 2 ms, instead of reacting to every signal change. Try it if pages jump on their own or skip when turning fast.</div></div><button id="knobFilt"></button></div>
+ <div class="set"><div class="muted" id="knobStops"></div></div>
 </div>
 <h2>Home pages</h2>
 <p class="sub">The car pages the knob and swipes step through. Trouble codes and Engine health come back by themselves while they have something to report.</p>
@@ -264,9 +271,12 @@ function render(){
  $('tint').value=S.tint;
  $('pages').innerHTML=(S.pages||[]).map((p,i)=>`<div class="row ${p.hidden?'hidden':''}"><div class="name"><b>${esc(p.name)}</b></div><button data-pg="${i}" class="vis ${p.hidden?'':'on'}">${p.hidden?'Hidden':'Shown'}</button></div>`).join('');
  $('leds').textContent=S.leds?'On':'Off';$('leds').className=S.leds?'on':'';
- const k=S.knob;if(k){$('knob').value=k.mode;const det='a click every '+(k.learnedHalf?'half':'full')+' step';
-  $('knobTxt').textContent=(k.mode==0?(k.bothStops||!k.learnedHalf?'Detected: '+det+'. ':'Assumed: '+det+' (confirmed once the knob has stopped at a few clicks). '):'Set by hand. Auto detects '+det+'. ')+
-   'If one click moves two pages, pick Every full step; if only every other click does anything, pick Every half step.'}
+ const k=S.knob;if(k){const KN={1:'half',2:'full',3:'quarter'},st=k.stops||[0,0,0,0],n=st.reduce((a,b)=>a+b,0);
+  $('knob').value=k.mode;const det='a click every '+KN[k.learned]+' step';
+  $('knobTxt').textContent=k.mode==0?(n>=3?'Detected: ':'Assumed: ')+det+(n>=3?'.':' (confirmed once the knob has stopped at a few clicks).'):'Set by hand. Auto would use '+det+'.';
+  $('knobRev').textContent=k.reverse?'Reversed':'Normal';$('knobRev').className=k.reverse?'on':'';
+  $('knobFilt').textContent=k.filter?'On':'Off';$('knobFilt').className=k.filter?'on':'';
+  $('knobStops').textContent='Where the knob has come to rest since the display started: A/B both low '+st[0]+'\u00d7, in between '+(st[1]+st[2])+'\u00d7, both high '+st[3]+'\u00d7. Both low and both high: half step. Always the same one: full step. In between too: quarter step.'}
  if(S.obd){$('disp').value=S.obd.disp;$('tankCap').value=S.obd.tankCap}
  $('fw').textContent=S.fw||'';
  renderSvc();
@@ -326,6 +336,8 @@ $('setLevel').onclick=e=>sure(e.target,()=>post('/api/obd',{fuelLevel:+$('level'
 $('tint').onchange=e=>{S.tint=+e.target.value;post('/api/settings',{tint:S.tint})};
 $('leds').onclick=()=>{S.leds=!S.leds;render();post('/api/settings',{leds:S.leds})};
 $('knob').onchange=e=>{S.knob.mode=+e.target.value;render();post('/api/settings',{knobMode:S.knob.mode}).then(ok=>ok&&toast('Saved'))};
+$('knobRev').onclick=()=>{S.knob.reverse=!S.knob.reverse;render();post('/api/settings',{knobReverse:S.knob.reverse}).then(ok=>ok&&toast('Saved'))};
+$('knobFilt').onclick=()=>{S.knob.filter=!S.knob.filter;render();post('/api/settings',{knobFilter:S.knob.filter}).then(ok=>ok&&toast('Saved'))};
 $('resetTrip').onclick=e=>sure(e.target,()=>post('/api/obd',{resetTrip:true}).then(()=>toast('Trip reset')));
 $('fill').onclick=()=>{const g=parseFloat($('pumped').value);if(!(g>0)){toast('Enter the gallons pumped');return}
  post('/api/obd',{fillUp:g}).then(()=>{$('pumped').value='';toast('Tank reset & calibrated')})};

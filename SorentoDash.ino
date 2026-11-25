@@ -43,7 +43,7 @@ RfCapture rf;
 History hist;
 Health health;
 
-#define FW_VERSION "1.26"
+#define FW_VERSION "1.27"
 
 // ---------------------------------------------------------------- tuning
 constexpr uint32_t LONG_PRESS_MS = 600;
@@ -179,86 +179,141 @@ static uint32_t parseColor(const String &s, uint32_t fallback) {
 // or history are being written to flash) can't leave a leftover count that
 // later turns into a skipped or extra page when the turning direction changes.
 //
-// Encoders come in two kinds. The CrowPanel's clicks every half A/B cycle, so
-// it rests at both "A and B high" and "A and B low" (two quarter steps per
+// Encoders come in three kinds. The CrowPanel's clicks every half A/B cycle,
+// so it rests at both "A and B high" and "A and B low" (two quarter steps per
 // click). Others click once per full cycle and always rest at the same one of
-// those (four quarter steps per click). Counting a half-step knob as a
-// full-step one gives a page every other click, and which clicks count shifts
-// around - the knob seems to skip and jump. The kind is learned from where the
-// knob comes to rest (takeDetents) and saved.
+// those (four quarter steps per click), and a few click at every quarter step
+// (they rest at all four states). Counting with the wrong kind gives skipped,
+// doubled or jumping pages. The kind is learned from where the knob comes to
+// rest (takeDetents) and saved; the phone page can also set it by hand, swap
+// the direction, and turn on a noise filter.
+enum : uint8_t { KNOB_AUTO = 0, KNOB_HALF = 1, KNOB_FULL = 2, KNOB_QUARTER = 3 };
+static const char *const KNOB_KIND_NAMES[] = {"auto", "half", "full", "quarter"};
 volatile int32_t encDetents = 0;
 volatile int8_t encQuad = 0;
 volatile uint8_t encLast = 0;
-volatile uint8_t encRest = 3;      // full-step knob: A/B state at a click; read at start-up, re-learned while still
-volatile bool encHalf = true;      // half-step knob: both 00 and 11 are clicks
+volatile uint8_t encRest = 3;          // full-step knob: A/B state at a click; read at start-up, re-learned while still
+volatile uint8_t encKind = KNOB_HALF;  // how clicks are counted right now
 portMUX_TYPE encMux = portMUX_INITIALIZER_UNLOCKED;
-uint8_t encStops[2] = {0, 0};      // times the knob came to rest at 00 / 11 since start-up
+uint8_t encStops[4] = {0, 0, 0, 0};    // times the knob came to rest at A/B 00, 01, 10, 11 since start-up
 DRAM_ATTR static const int8_t ENC_TABLE[16] = {0, -1, 1, 0, 1, 0, 0, -1, -1, 0, 0, 1, 0, 1, -1, 0};
 
 static uint8_t IRAM_ATTR readEncoderPins() {
   return ((uint8_t)digitalRead(PIN_ENC_A) << 1) | (uint8_t)digitalRead(PIN_ENC_B);
 }
 
-void IRAM_ATTR encoderISR() {
-  uint8_t s = readEncoderPins();
+// One new A/B reading, from the pin interrupt or (noise filter) the sampling timer.
+static void IRAM_ATTR encStep(uint8_t s) {
   portENTER_CRITICAL_ISR(&encMux);
-  int8_t q = encQuad + ENC_TABLE[(encLast << 2) | s];
+  int8_t m = ENC_TABLE[(encLast << 2) | s];
   encLast = s;
-  if (encHalf ? (s == 0 || s == 3) : s == encRest) {
-    // Two quarter steps settle the direction even if an edge was lost.
-    if (q >= 2) encDetents = encDetents + 1;
-    else if (q <= -2) encDetents = encDetents - 1;
-    q = 0;
+  if (encKind == KNOB_QUARTER) {
+    encDetents = encDetents + m;  // every quarter step is a click
+  } else {
+    int8_t q = encQuad + m;
+    if (encKind == KNOB_HALF ? (s == 0 || s == 3) : s == encRest) {
+      // Two quarter steps settle the direction even if an edge was lost.
+      if (q >= 2) encDetents = encDetents + 1;
+      else if (q <= -2) encDetents = encDetents - 1;
+      q = 0;
+    }
+    encQuad = constrain(q, -8, 8);
   }
-  encQuad = constrain(q, -8, 8);
   portEXIT_CRITICAL_ISR(&encMux);
 }
 
-// Switch how clicks are counted. rest: the A/B state the knob sits at now.
-static void setEncHalf(bool half, uint8_t rest) {
+void IRAM_ATTR encoderISR() { encStep(readEncoderPins()); }
+
+// Noise filter: rather than reacting to every edge, sample the pins 1000 times
+// a second and pass a new reading on only once it has held for 2 ms. Contact
+// bounce and electrical spikes are much shorter; a quarter step lasts ~10 ms
+// even when spinning the knob fast.
+#ifndef SORENTO_SIM
+static hw_timer_t *encTimer = nullptr;
+static void IRAM_ATTR encSampleISR() {
+  static uint8_t cand = 0xFF, held = 0;
+  uint8_t s = readEncoderPins();
+  if (s != cand) { cand = s; held = 0; return; }
+  if (held < 2) held++;
+  if (held >= 2 && s != encLast) encStep(s);
+}
+#endif
+
+// Count clicks as `kind` from now on, starting from where the knob sits.
+static void setEncKind(uint8_t kind) {
+  uint8_t s = readEncoderPins();
   portENTER_CRITICAL(&encMux);
-  encHalf = half;
-  if (rest == 0 || rest == 3) encRest = rest;
+  encKind = kind;
+  if (s == 0 || s == 3) encRest = s;
+  encLast = s;
   encQuad = 0;
   portEXIT_CRITICAL(&encMux);
 }
 
+// The kind in use: the one set on the phone page, else the learned one.
+static uint8_t knobKind() { return cfg.encMode ? cfg.encMode : cfg.encKind; }
+
+static void setEncFilter(bool on) {
+#ifndef SORENTO_SIM
+  if (on) {
+    detachInterrupt(digitalPinToInterrupt(PIN_ENC_A));
+    detachInterrupt(digitalPinToInterrupt(PIN_ENC_B));
+    if (!encTimer) {
+      encTimer = timerBegin(1000000);
+      timerAttachInterrupt(encTimer, encSampleISR);
+      timerAlarm(encTimer, 1000, true, 0);
+    } else {
+      timerStart(encTimer);
+    }
+  } else {
+    if (encTimer) timerStop(encTimer);
+    attachInterrupt(digitalPinToInterrupt(PIN_ENC_A), encoderISR, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(PIN_ENC_B), encoderISR, CHANGE);
+  }
+#else
+  (void)on;  // the simulator's knob has no noise
+#endif
+  setEncKind(encKind);  // start counting afresh from the current reading
+}
+
 static int32_t takeDetents(uint32_t now) {
-  // A knob left alone always sits at a click, so a both-high or both-low
-  // state held for a while is a resting state.
+  // A knob left alone always sits at a click, so a state held for a while is
+  // a resting state.
   static uint8_t still = 0xFF;
   static uint32_t stillSince = 0;
   static bool stopCounted = false;
   uint8_t s = readEncoderPins();
   if (s != still) { still = s; stillSince = now; stopCounted = false; }
-  if ((s == 0 || s == 3) && !stopCounted && now - stillSince > 600) {
-    // Which kind of knob: one that stops at both states clicks every half
-    // cycle; one that has stopped many times, always at the same state,
-    // clicks every full cycle. (Two stops at each guards against a hand
-    // holding a full-step knob part-way through a click.)
+  if (!stopCounted && now - stillSince > 600) {
+    // Which kind of knob: one that also stops between "both high" and "both
+    // low" clicks every quarter step; one that stops at both clicks every
+    // half cycle; one that has stopped many times, always at the same state,
+    // every full cycle. (Needing several stops guards against a hand holding
+    // the knob part-way through a click.)
     stopCounted = true;
-    uint8_t &n = encStops[s == 3];
-    if (n < 255) n++;
-    bool half = cfg.encHalfStep;
-    if (encStops[0] >= 2 && encStops[1] >= 2) half = true;
-    else if (encStops[0] + encStops[1] >= 10 && (encStops[0] == 0 || encStops[1] == 0)) half = false;
-    if (half != cfg.encHalfStep) {
-      cfg.saveEncHalfStep(half);
-      events.add(half ? "Knob: detected a click every half step" : "Knob: detected a click every full step");
-      if (cfg.encMode == 0) setEncHalf(half, s);  // set by hand on the phone page: only remembered
+    if (encStops[s] < 255) encStops[s]++;
+    int mid = encStops[1] + encStops[2], ends = encStops[0] + encStops[3];
+    int kind = cfg.encKind;
+    if (mid >= 3 && mid * 3 >= mid + ends) kind = KNOB_QUARTER;
+    else if (encStops[0] >= 2 && encStops[3] >= 2) kind = KNOB_HALF;
+    else if (ends >= 10 && (encStops[0] == 0 || encStops[3] == 0) && mid * 3 < ends) kind = KNOB_FULL;
+    if (kind != cfg.encKind) {
+      cfg.saveEncKind(kind);
+      events.add("Knob: detected a click every %s step", KNOB_KIND_NAMES[kind]);
+      if (cfg.encMode == KNOB_AUTO) setEncKind(kind);  // set by hand on the phone page: only remembered
     }
   }
   portENTER_CRITICAL(&encMux);
   // Full-step knob: re-learn its resting state (corrects a start-up reading
   // taken mid-turn).
-  if (!encHalf && (s == 0 || s == 3) && s != encRest && encLast == s && now - stillSince > 2000) {
+  if (encKind == KNOB_FULL && (s == 0 || s == 3) && s != encRest && encLast == s && now - stillSince > 2000) {
     encRest = s;
     encQuad = 0;
   }
   int32_t d = encDetents;
   encDetents = 0;
   portEXIT_CRITICAL(&encMux);
-  return d;
+  return cfg.encReverse ? -d : d;
 }
 
 // ---------------------------------------------------------------- button
@@ -573,9 +628,11 @@ String webStateJson() {
   doc["dimPct"] = cfg.dimPct;
   JsonObject knob = doc["knob"].to<JsonObject>();
   knob["mode"] = cfg.encMode;
-  knob["learnedHalf"] = cfg.encHalfStep;
-  knob["stops"] = encStops[0] + encStops[1];
-  knob["bothStops"] = encStops[0] && encStops[1];
+  knob["learned"] = cfg.encKind;
+  knob["reverse"] = cfg.encReverse;
+  knob["filter"] = cfg.encFilter;
+  JsonArray stops = knob["stops"].to<JsonArray>();  // A/B 00, 01, 10, 11
+  for (uint8_t n : encStops) stops.add(n);
   JsonArray pages = doc["pages"].to<JsonArray>();
   for (int i = 0; i < CP_COUNT; i++) {
     JsonObject p = pages.add<JsonObject>();
@@ -705,13 +762,21 @@ void webSaveSettings(const String &body) {
     cfg.saveTint();
   }
   if (doc["knobMode"].is<int>()) {
-    int m = constrain(doc["knobMode"].as<int>(), 0, 2);
+    int m = constrain(doc["knobMode"].as<int>(), 0, 3);
     if (m != cfg.encMode) {
       cfg.saveEncMode(m);
-      bool half = m ? m == 1 : cfg.encHalfStep;
-      setEncHalf(half, readEncoderPins());
-      events.add(m ? "Knob set by hand: a click every %s step" : "Knob set to auto (%s step)", half ? "half" : "full");
+      setEncKind(knobKind());
+      events.add(m ? "Knob set by hand: a click every %s step" : "Knob set to auto (%s step)", KNOB_KIND_NAMES[knobKind()]);
     }
+  }
+  if (doc["knobReverse"].is<bool>() && doc["knobReverse"] != cfg.encReverse) {
+    cfg.saveEncReverse(doc["knobReverse"]);
+    events.add(cfg.encReverse ? "Knob direction reversed" : "Knob direction normal");
+  }
+  if (doc["knobFilter"].is<bool>() && doc["knobFilter"] != cfg.encFilter) {
+    cfg.saveEncFilter(doc["knobFilter"]);
+    setEncFilter(cfg.encFilter);
+    events.add(cfg.encFilter ? "Knob noise filter on" : "Knob noise filter off");
   }
   if (doc["hiddenPages"].is<int>()) {
     int all = (1 << CP_COUNT) - 1, m = doc["hiddenPages"].as<int>() & all;
@@ -2417,7 +2482,7 @@ static void handleInput(int32_t det, Press btn, uint32_t now) {
 //   swipe l|r  touch swipe                    obdsim 0|1  demo car on/off
 //   shot    dump the frame buffer (RGB565)   log 0|1  Audio FX link logging
 //   status  connection summary               files   what's in the flash file store
-//   enc     knob kind (half/full step) and where it has come to rest
+//   enc     knob kind (quarter/half/full step), direction, filter, where it has come to rest
 //   events  the event log                    hist    drive history (JSON)
 //   fsput <path> <offset> <hex> / fsrm <path>   write / delete a file      restart
 #ifdef SORENTO_SIM
@@ -2527,9 +2592,10 @@ static bool handleConsole(int32_t &det, Press &btn, int &swipe) {
   else if (s == "shot") return true;
   else if (s == "ver") Serial.println(FW_VERSION " " __DATE__ " " __TIME__);
   else if (s == "enc")
-    Serial.printf("knob: %s step (%s), A/B now %u%u, stops at 00:%u 11:%u%s", encHalf ? "half" : "full",
-                  cfg.encMode ? "set by hand" : "auto", readEncoderPins() >> 1, readEncoderPins() & 1, encStops[0],
-                  encStops[1], "\n");
+    Serial.printf("knob: %s step (%s)%s%s, A/B now %u%u, stops at 00:%u 01:%u 10:%u 11:%u%s",
+                  KNOB_KIND_NAMES[encKind], cfg.encMode ? "set by hand" : "auto", cfg.encReverse ? ", reversed" : "",
+                  cfg.encFilter ? ", filtered" : "", readEncoderPins() >> 1, readEncoderPins() & 1, encStops[0],
+                  encStops[1], encStops[2], encStops[3], "\n");
   else if (s == "events" || s == "health") {
     Serial.setTxTimeoutMs(1000);  // long replies: wait for the PC instead of dropping the rest
     Serial.println(s == "events" ? webLogText() : webHealthJson());
@@ -2649,11 +2715,8 @@ void setup() {
   pinMode(PIN_ENC_A, INPUT_PULLUP);
   pinMode(PIN_ENC_B, INPUT_PULLUP);
   pinMode(PIN_ENC_SW, INPUT_PULLUP);
-  encHalf = cfg.encMode ? cfg.encMode == 1 : cfg.encHalfStep;
-  encLast = readEncoderPins();
-  if (encLast == 0 || encLast == 3) encRest = encLast;  // the knob sits at a click at power-up
-  attachInterrupt(digitalPinToInterrupt(PIN_ENC_A), encoderISR, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(PIN_ENC_B), encoderISR, CHANGE);
+  encKind = knobKind();
+  setEncFilter(cfg.encFilter);  // pin interrupts or the sampling timer; starts from where the knob sits
   touch.begin(PIN_TP_SDA, PIN_TP_SCL, PIN_TP_RST);
 
   fx.begin(Serial1, PIN_FX_RX, PIN_FX_TX);
